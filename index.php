@@ -9,7 +9,7 @@
   <h2>iDomus</h2>
   <nav>
     <div>
-      <button>login</button>
+      <button onclick="window.location.href='app/views/login.php';">login</button>
       <button onclick="window.location.href='app/views/signup.php';">signup</button>
     </div>
   </nav>
