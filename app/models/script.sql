@@ -1,3 +1,6 @@
+--    
+--  SQL Script para la creación de tablas en PostgreSQL
+
 -- Tabla de usuarios
 CREATE TABLE usuario (
     idUser SERIAL PRIMARY KEY,
@@ -23,3 +26,16 @@ CREATE TABLE usuario_rol (
     idRol INT REFERENCES rol(idRol) ON DELETE CASCADE,
     PRIMARY KEY (idUser, idRol)
 );
+
+
+-- Insertamos roles base
+INSERT INTO rol (nombre_rol) VALUES ('usuario'), ('admin'), ('personal');
+
+-- Creamos un usuario
+INSERT INTO usuario (nombre, apellido, correo, contrasena)
+VALUES ('Juan', 'Pérez', 'juanp@example.com', 'hash_contrasena');
+
+-- Asignamos roles al usuario
+INSERT INTO usuario_rol (idUser, idRol)
+VALUES (1, 1),  -- usuario normal
+       (1, 2);  -- también admin
