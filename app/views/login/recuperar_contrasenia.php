@@ -1,5 +1,5 @@
 <?php
-include_once '../models/conexion.php';
+include_once '../../models/conexion.php';
 $mensaje = '';
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     $correo = $_POST['correo'] ?? '';
@@ -44,7 +44,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                     <div class="email-body">
                         <h2>Hola, '.$usuario['nombre'].'</h2>
                         <p>Solicitaste recuperar tu contraseña en <b>iDomus</b>. Usa el código anterior para continuar.</p>
-                        <a href="http://localhost/idomus/app/views/cambiar_contrasenia.php?correo='.urlencode($correo).'&codigo='.$codigo.'" class="verify-btn">Cambiar contraseña</a>
+                        <a href="http://localhost/idomus/app/views/login/cambiar_contrasenia.php?correo='.urlencode($correo).'&codigo='.$codigo.'" class="verify-btn">Cambiar contraseña</a>
                         <p>Si no solicitaste este correo, puedes ignorarlo.</p>
                     </div>
                     <div class="email-footer">

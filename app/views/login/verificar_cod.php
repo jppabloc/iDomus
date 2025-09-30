@@ -1,5 +1,5 @@
 <?php
-include_once '../models/conexion.php';
+include_once '../../models/conexion.php';
 // Obtener el correo desde la URL
 if (isset($_GET['correo'])) {
     $correo = $_GET['correo'];

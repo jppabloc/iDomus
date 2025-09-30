@@ -175,8 +175,8 @@
           <li class="nav-item"><a class="nav-link" href="#">Acerca de</a></li>
         </ul>
         <div class="d-flex gap-2 ms-lg-3">
-          <a class="btn btn-domus" href="app/views/login.php">Login</a>
-          <a class="btn btn-domus-accent" href="app/views/signup.php">Signup</a>
+          <a class="btn btn-domus" href="app/views/login/login.php">Login</a>
+          <a class="btn btn-domus-accent" href="app/views/login/signup.php">Signup</a>
         </div>
       </div>
     </div>

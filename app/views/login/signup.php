@@ -1,5 +1,5 @@
 <?php
-  include_once '../models/conexion.php';
+  include_once '../../models/conexion.php';
   if ($_SERVER["REQUEST_METHOD"] == "POST") {
       // Validar reCAPTCHA de Google del lado del servidor
       $recaptchaSecret = '6Le4VckrAAAAALFhjEBwqo_44tyiWIVP7Mw5UM0H'; // Cambia por tu clave secreta real
@@ -99,7 +99,7 @@
                                     <div class="email-body">
                                         <h2>Hola, '.$nombre.'</h2>
                                         <p>Gracias por registrarte en <b>iDomus</b>. Usa el código anterior para verificar tu cuenta.</p>
-                                        <a href="http://localhost/idomus/app/views/verificar_cod.php?'.$correo.'" class="verify-btn">Verificar Cuenta</a>
+                                        <a href="http://localhost/idomus/app/views/login/verificar_cod.php?'.$correo.'" class="verify-btn">Verificar Cuenta</a>
                                         <p>Si no solicitaste este correo, puedes ignorarlo.</p>
                               </div>
                               <div class="email-footer">
@@ -121,7 +121,7 @@
                     echo "Error al enviar el correo a $correo";
                   
                   // Redirigir a la página de verificación SOLO si todo fue exitoso y sin salida previa
-                  header("Location: http://localhost/idomus/app/views/verificar_cod.php?$correo");
+                  header("Location: http://localhost/idomus/app/views/login/verificar_cod.php?$correo");
                   exit;
               } catch (PDOException $e) {
                   $error = "❌ Error en el registro: " . $e->getMessage();
@@ -281,7 +281,7 @@
 </head>
 <body>
   <div class="signup-card">
-    <img src="../../public/img/iDomus_logo.png" alt="iDomus Logo" class="signup-logo">
+    <img src="../../../public/img/iDomus_logo.png" alt="iDomus Logo" class="signup-logo">
     <div class="signup-title">Registro</div>
     <?php if (isset($error)) { echo '<div class="signup-msg">' . $error . '</div>'; } ?>
     <form id="signupForm" method="POST" action="signup.php" onsubmit="return validarFormulario()">
