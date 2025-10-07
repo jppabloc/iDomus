@@ -1,400 +1,290 @@
 <?php
-  include_once '../../models/conexion.php';
-  if ($_SERVER["REQUEST_METHOD"] == "POST") {
-      // Validar reCAPTCHA de Google del lado del servidor
-      $recaptchaSecret = '6Le4VckrAAAAALFhjEBwqo_44tyiWIVP7Mw5UM0H'; // Cambia por tu clave secreta real
-      $recaptchaResponse = $_POST['g-recaptcha-response'] ?? '';
-      $recaptchaUrl = 'https://www.google.com/recaptcha/api/siteverify';
-      $recaptchaData = [
-          'secret' => '6LcUlskrAAAAAIp6yHKWDVPhje4L-La9HYgfy6ff', // Cambia por tu clave secreta real
-          'response' => $recaptchaResponse,
-          'remoteip' => $_SERVER['REMOTE_ADDR']
-      ];
-      $options = [
-          'http' => [
-              'header'  => "Content-type: application/x-www-form-urlencoded\r\n",
-              'method'  => 'POST',
-              'content' => http_build_query($recaptchaData),
-          ]
-      ];
-      $context  = stream_context_create($options);
-      $result = file_get_contents($recaptchaUrl, false, $context);
-      $res = json_decode($result, true);
-      // DEPURAR: Mostrar el token recibido y la respuesta de Google
-      if (!isset($res['success']) || !$res['success']) {
-          echo '<pre>';
-          echo 'g-recaptcha-response: ';
-          var_dump($recaptchaResponse);
-          echo "\nRespuesta de Google:\n";
-          var_dump($res);
-          echo '</pre>';
-          echo '<script>alert("❌ Debes completar el reCAPTCHA correctamente o revisar la configuración de tu clave secreta y dominio."); window.history.back();</script>';
-          exit;
-      } else {
-          $nombre = $_POST['nombre'];
-          $apellido = $_POST['apellido'];
-          $correo = $_POST['correo'];
-          $password = $_POST['password'];
-          $password2 = $_POST['password2'];
+// app/views/login/signup.php
+declare(strict_types=1);
+include_once '../../models/conexion.php';
 
-          // Validar que las contraseñas coinciden
-          if ($password !== $password2) {
-              $error = "❌ Las contraseñas no coinciden.";
-          } else {
+//www.google.com/recaptcha/admin/create
 
-              // Encriptar contraseña
-              $passwordHash = password_hash($password, PASSWORD_BCRYPT);
+// ===== Config =====
+$APP_ENV            = getenv('APP_ENV') ?: 'dev'; // 'dev' | 'prod'
+$RECAPTCHA_SITE_KEY = getenv('RECAPTCHA_SITE_KEY') ?: '6LcOteArAAAAAII9hmrhYyZF_f2WR0w30P-iPHnU'; // TU site key (widget)
+$RECAPTCHA_SECRET   = getenv('RECAPTCHA_SECRET')  ?: '6LcOteArAAAAAAFO8P4EiMRH9HTXhLfR_GxVxHP8';                                           // TU secret key (server)
+$IDOMUS_BASE_URL    = rtrim(getenv('IDOMUS_BASE_URL') ?: 'http://localhost/iDomus', '/');
+$MAIL_FROM          = getenv('MAIL_FROM')     ?: 'no-reply@idomus.com';
+$MAIL_REPLY_TO      = getenv('MAIL_REPLY_TO') ?: 'soporte@idomus.com';
 
-              // Generar código de verificación
-              $codigo = rand(100000, 999999);
+$swal = null;
 
-              try {
-                  // Insertar usuario
-                  $stmt = $conexion->prepare("INSERT INTO usuario 
-                      (nombre, apellido, correo, contrasena, codigo_verificacion) 
-                      VALUES (:nombre, :apellido, :correo, :contrasena, :codigo) RETURNING idUser");
+// --- util: validar reCAPTCHA v2 checkbox ---
+function validar_recaptcha_v2(string $secret, ?string $token, ?string $ip): array {
+  if (!$secret) return ['ok'=>false, 'msg'=>'Falta RECAPTCHA_SECRET en el servidor.'];
+  if (!$token)  return ['ok'=>false, 'msg'=>'Marca “No soy un robot”.'];
 
-                  $stmt->execute([
-                      ':nombre' => $nombre,
-                      ':apellido' => $apellido,
-                      ':correo' => $correo,
-                      ':contrasena' => $passwordHash,
-                      ':codigo' => $codigo
-                  ]);
+  $payload = http_build_query([
+    'secret'   => $secret,
+    'response' => $token,
+    'remoteip' => $ip ?? ''
+  ]);
+  $url = 'https://www.google.com/recaptcha/api/siteverify';
 
-                  $idUser = $stmt->fetchColumn();
-
-                  // Asignar rol "usuario" por defecto
-                  $stmtRol = $conexion->prepare("INSERT INTO usuario_rol (idUser, idRol) VALUES (:idUser,   1)");
-                  $stmtRol->execute([':idUser' => $idUser]);
-
-                  // enviando el codigo al correo
-                  $asunto = 'iDomus - Verificación de Correo';
-                  $mensaje = '
-                  <!DOCTYPE html>
-                  <html lang="es">
-                  <head>
-                      <meta charset="UTF-8">
-                      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                      <title>Correo de Verificación</title>
-                      <style>
-                          body { font-family: Arial, sans-serif; background: #f4f4f4; margin: 0; padding: 0; }
-                          .container { width: 100%; padding: 10px; text-align: center; }
-                          .email-content { background: #fff; max-width: 500px; margin: auto; padding: 20px; 
-                                           border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-                          .email-header { background: #023047; color: white; padding: 15px; 
-                                          border-radius: 8px 8px 0 0; font-size: 20px; font-weight: bold; }
-                          .email-body { padding: 20px; color: #333; font-size: 16px; line-height: 1.5; }
-                          .verify-btn { display: inline-block; padding: 12px 24px; background: #fb8500; 
-                                        color: white; text-decoration: none; border-radius: 6px; font-size: 16px; margin-top: 15px; }
-                                .email-footer { font-size: 12px; color: #777; margin-top: 20px; }
-                            </style>
-                        </head>
-                        <body>
-                            <div class="container">
-                                <div class="email-content">
-                                    <div class="email-header">
-                                        Tu código de verificación iDomus: <br><strong>'.$codigo.'</strong>
-                                    </div>
-                                    <div class="email-body">
-                                        <h2>Hola, '.$nombre.'</h2>
-                                        <p>Gracias por registrarte en <b>iDomus</b>. Usa el código anterior para verificar tu cuenta.</p>
-                                        <a href="http://localhost/idomus/app/views/login/verificar_cod.php?'.$correo.'" class="verify-btn">Verificar Cuenta</a>
-                                        <p>Si no solicitaste este correo, puedes ignorarlo.</p>
-                              </div>
-                              <div class="email-footer">
-                                  &copy; '.date("Y").' iDomus. Todos los derechos reservados.
-                              </div>
-                          </div>
-                      </div>
-                  </body>
-                  </html>';
-
-                  // Cabeceras del correo
-                  $headers = "MIME-Version: 1.0" . "\r\n";
-                  $headers .= "Content-type:text/html;charset=UTF-8" . "\r\n";
-                  $headers .= 'From: '.$correo.' ' . "\r\n" . 'Reply-To: j.pablo.xyz@gmail.com ';
-                  $headers .= 'test o pruebas' . "\r\n"; 
-                  if(mail($correo, $asunto, $mensaje, $headers))
-                    echo "Correo enviado correctamente a $correo";
-                  else
-                    echo "Error al enviar el correo a $correo";
-                  
-                  // Redirigir a la página de verificación SOLO si todo fue exitoso y sin salida previa
-                  header("Location: http://localhost/idomus/app/views/login/verificar_cod.php?$correo");
-                  exit;
-              } catch (PDOException $e) {
-                  $error = "❌ Error en el registro: " . $e->getMessage();
-              }
-          }
-      }
+  if (function_exists('curl_init')) {
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+      CURLOPT_RETURNTRANSFER => true,
+      CURLOPT_POST           => true,
+      CURLOPT_POSTFIELDS     => $payload,
+      CURLOPT_TIMEOUT        => 8,
+    ]);
+    $raw = curl_exec($ch);
+    $err = curl_error($ch);
+    curl_close($ch);
+    if ($raw === false) return ['ok'=>false, 'msg'=>"Error cURL: $err"];
+  } else {
+    $opts = ['http'=>[
+      'header'=>"Content-type: application/x-www-form-urlencoded\r\n",
+      'method'=>'POST',
+      'content'=>$payload,
+      'timeout'=>8,
+    ]];
+    $context = stream_context_create($opts);
+    $raw = @file_get_contents($url, false, $context);
+    if ($raw === false) return ['ok'=>false, 'msg'=>'No se pudo contactar con Google reCAPTCHA.'];
   }
+
+  $json = json_decode($raw, true);
+  if (!is_array($json) || empty($json['success'])) {
+    return ['ok'=>false, 'msg'=>'Verificación reCAPTCHA inválida.'];
+  }
+  return ['ok'=>true, 'msg'=>'OK'];
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+  // 1) reCAPTCHA obligatorio (como pediste)
+  $token = $_POST['g-recaptcha-response'] ?? '';
+  $ip    = $_SERVER['REMOTE_ADDR'] ?? null;
+  $rc    = validar_recaptcha_v2($RECAPTCHA_SECRET, $token, $ip);
+
+  if (!$rc['ok']) {
+    $swal = ['icon'=>'error','title'=>'reCAPTCHA','text'=>$rc['msg'],'redirect'=>null];
+  } else {
+    // 2) Campos
+    $nombre    = trim($_POST['nombre']    ?? '');
+    $apellido  = trim($_POST['apellido']  ?? '');
+    $correo    = trim($_POST['correo']    ?? '');
+    $password  = (string)($_POST['password']  ?? '');
+    $password2 = (string)($_POST['password2'] ?? '');
+
+    // 3) Validaciones servidor
+    $errors = [];
+    if ($nombre==='' || $apellido==='' || $correo==='') $errors[] = 'Completa todos los campos.';
+    if (!filter_var($correo, FILTER_VALIDATE_EMAIL))     $errors[] = 'Correo no válido.';
+    if (strlen($password) < 6)                           $errors[] = 'Mínimo 6 caracteres.';
+    if (!preg_match('/[A-Z]/', $password))               $errors[] = 'Al menos una mayúscula.';
+    if (!preg_match('/[a-z]/', $password))               $errors[] = 'Al menos una minúscula.';
+    if (!preg_match('/[0-9]/', $password))               $errors[] = 'Al menos un número.';
+    if (!preg_match('/[^A-Za-z0-9]/', $password))        $errors[] = 'Al menos un carácter especial.';
+    if ($password !== $password2)                        $errors[] = 'Las contraseñas no coinciden.';
+
+    if ($errors) {
+      $swal = ['icon'=>'error','title'=>'Datos inválidos','text'=>implode(' ', $errors),'redirect'=>null];
+    } else {
+      $passwordHash = password_hash($password, PASSWORD_BCRYPT);
+      $codigo = random_int(100000, 999999);
+
+      try {
+        // 4) Insertar usuario y rol
+        $stmt = $conexion->prepare("
+          INSERT INTO usuario (nombre, apellido, correo, contrasena, codigo_verificacion)
+          VALUES (:nombre, :apellido, :correo, :contrasena, :codigo)
+          RETURNING iduser
+        ");
+        $stmt->execute([
+          ':nombre'     => $nombre,
+          ':apellido'   => $apellido,
+          ':correo'     => $correo,
+          ':contrasena' => $passwordHash,
+          ':codigo'     => $codigo
+        ]);
+        $idUser = $stmt->fetchColumn();
+
+        $stmtRol = $conexion->prepare("INSERT INTO usuario_rol (iduser, idrol) VALUES (:iduser, 1)");
+        $stmtRol->execute([':iduser' => $idUser]);
+
+        // 5) Email verificación
+        $asunto   = 'iDomus - Verificación de Correo';
+        $verifUrl = $IDOMUS_BASE_URL.'/app/views/login/verificar_cod.php?correo='.urlencode($correo);
+        $html = '
+        <!doctype html><html><head><meta charset="UTF-8">
+        <style>
+          body{font-family:Arial,sans-serif;background:#f4f6f8;margin:0;padding:20px}
+          .card{max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:20px;box-shadow:0 6px 24px rgba(0,0,0,.1)}
+          .hdr{background:#023047;color:#fff;border-radius:10px;padding:16px;font-weight:bold;text-align:center}
+          .code{font-size:28px;letter-spacing:3px;color:#023047;margin:16px 0;text-align:center}
+          .btn{display:inline-block;background:#fb8500;color:#fff;text-decoration:none;padding:12px 18px;border-radius:8px}
+          .foot{font-size:12px;color:#6c7a89;margin-top:18px;text-align:center}
+        </style></head><body>
+          <div class="card">
+            <div class="hdr">Tu código de verificación</div>
+            <p>Hola <b>'.htmlspecialchars($nombre,ENT_QUOTES).'</b>, gracias por registrarte en <b>iDomus</b>.</p>
+            <div class="code">'.htmlspecialchars((string)$codigo,ENT_QUOTES).'</div>
+            <p>Ingresa este código en la pantalla de verificación:</p>
+            <p style="text-align:center;margin:18px 0;">
+              <a class="btn" href="'.htmlspecialchars($verifUrl,ENT_QUOTES).'">Verificar cuenta</a>
+            </p>
+            <div class="foot">&copy; '.date('Y').' iDomus</div>
+          </div>
+        </body></html>';
+
+        $headers  = "MIME-Version: 1.0\r\n";
+        $headers .= "Content-type: text/html; charset=UTF-8\r\n";
+        $headers .= "From: iDomus <".$MAIL_FROM.">\r\n";
+        $headers .= "Reply-To: ".$MAIL_REPLY_TO."\r\n";
+        @mail($correo, $asunto, $html, $headers);
+
+        $swal = [
+          'icon'=>'success',
+          'title'=>'¡Registro exitoso!',
+          'text'=>'Te enviamos un código. Ingresa el código para activar tu cuenta.',
+          'redirect'=>$verifUrl
+        ];
+      } catch (PDOException $e) {
+        $msg = ($e->getCode()==='23505') ? 'El correo ya está registrado.' : ('Error: '.$e->getMessage());
+        $swal = ['icon'=>'error','title'=>'Error en el registro','text'=>$msg,'redirect'=>null];
+      }
+    }
+  }
+}
 ?>
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="es">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>signup</title>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Registro iDomus</title>
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <!-- Google reCAPTCHA v2 checkbox -->
   <script src="https://www.google.com/recaptcha/api.js" async defer></script>
+  <!-- Bootstrap Icons para el toggle (sin emojis) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css"/>
+
   <style>
-    body {
-      min-height: 100vh;
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-      background: #fff;
-      background-image:
-        repeating-linear-gradient(45deg, #bfc9d1 0 1px, transparent 1px 10px),
-        repeating-linear-gradient(-45deg, #bfc9d1 0 1px, transparent 1px 10px);
-      background-size: 16px 16px;
-      font-family: 'Segoe UI', Arial, sans-serif;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
+    :root{ --accent:#1BAAA6; --dark:#0F3557; }
+    html,body{ width:100%; overflow-x:hidden; }
+    *,*::before,*::after{ box-sizing:border-box; }
+    body{
+      min-height:100vh; margin:0; display:flex; justify-content:center; align-items:center;
+      font-family:'Segoe UI',Arial,sans-serif; background:#f0f4f8; padding:16px;
     }
-    .signup-card {
-      background: #fff;
-      border-radius: 24px;
-      box-shadow: 0 4px 24px rgba(51,51,51,0.13);
-      max-width: 370px;
-      width: 95vw;
-      margin: 60px auto 0 auto;
-      padding: 36px 28px 28px 28px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      position: relative;
+    .signup-card{
+      background:#fff; border-radius:16px;
+      width:clamp(300px, 92vw, 440px);
+      padding:clamp(16px, 4vw, 28px);
+      box-shadow:0 4px 24px rgba(0,0,0,.1); text-align:center; position:relative;
     }
-    .signup-logo {
-      width: 70px;
-      height: 70px;
-      object-fit: contain;
-      border-radius: 50%;
-      background: #fff;
-      box-shadow: 0 2px 8px #1BAAA6, 0 0 16px #0F3557 inset;
-      border: 3px solid #1BAAA6;
-      position: absolute;
-      top: -35px;
-      left: 50%;
-      transform: translateX(-50%);
-      filter: drop-shadow(0 0 8px #1BAAA6);
+    .signup-logo{
+      width:72px; height:72px; margin-bottom:14px; border-radius:50%;
+      border:3px solid var(--accent); box-shadow:0 0 16px rgba(27,170,166,.6);
+      object-fit:cover; background:#fff;
     }
-    .signup-title {
-      margin-top: 48px;
-      margin-bottom: 24px;
-      font-size: 2rem;
-      color: #0F3557;
-      font-family: 'Comic Sans MS', 'Segoe UI', Arial, sans-serif;
-      text-align: center;
-      font-weight: 700;
-      letter-spacing: 1.5px;
+    .signup-title{ font-size:1.6rem; color:var(--dark); margin-bottom:12px; font-weight:800; }
+    form{ display:flex; flex-direction:column; gap:12px; }
+
+    .input-group{ position:relative; }
+    .input-group input{
+      width:100%; padding:12px 44px 12px 12px; background:#f7fafd;
+      border:2px solid #bfc9d1; border-radius:10px; font-size:1rem;
+      transition:border .2s, box-shadow .25s ease;
+      box-shadow:0 0 0.5px rgba(27,170,166,.25), inset 0 0 0.5px rgba(27,170,166,.15);
     }
-    form {
-      width: 100%;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
+    .input-group input:focus{
+      border-color:var(--accent);
+      box-shadow:0 0 6px rgba(27,170,166,.35), inset 0 0 2px rgba(27,170,166,.25);
+      outline:none;
     }
-    label {
-      display: none;
+    .toggle-pass{
+      position:absolute; right:10px; top:50%; transform:translateY(-50%);
+      font-size:1.1rem; color:#555; cursor:pointer;
     }
-    input[type="text"], input[type="email"], input[type="password"] {
-      width: 100%;
-      padding: 12px 14px;
-      margin-bottom: 16px;
-      border: 2px solid #bfc9d1;
-      border-radius: 10px;
-      font-size: 1.08rem;
-      background: #f7fafd;
-      color: #333;
-      outline: none;
-      transition: border 0.2s;
+    .toggle-pass:hover{ color:var(--accent); }
+
+    .g-recaptcha{ display:flex; justify-content:center; }
+
+    button[type="submit"]{
+      width:100%; background:var(--dark); color:#fff; border:none;
+      border-radius:10px; padding:12px; font-size:1rem; font-weight:700;
+      cursor:pointer; transition:background .2s; box-shadow:0 2px 8px rgba(0,0,0,.08);
     }
-    input[type="text"]:focus, input[type="email"]:focus, input[type="password"]:focus {
-      border: 2px solid #1BAAA6;
-    }
-    button[type="submit"] {
-      width: 100%;
-      background: #0F3557;
-      color: #1BAAA6;
-      border: none;
-      border-radius: 10px;
-      padding: 13px 0;
-      font-size: 1.15rem;
-      font-weight: 700;
-      margin-top: 8px;
-      margin-bottom: 18px;
-      cursor: pointer;
-      box-shadow: 0 2px 8px #bfc9d1;
-      transition: background 0.2s, color 0.2s;
-    }
-    button[type="submit"]:hover {
-      background: #1BAAA6;
-      color: #fff;
-    }
-    .signup-msg {
-      width: 100%;
-      text-align: center;
-      margin-bottom: 12px;
-      color: #d32f2f;
-      font-size: 1.05rem;
-      font-weight: 500;
-    }
-    .forgot {
-      color: #1BAAA6;
-      text-align: center;
-      font-size: 1.05rem;
-      margin-top: 0;
-      margin-bottom: 0;
-      text-decoration: none;
-      display: block;
-      font-family: 'Comic Sans MS', 'Segoe UI', Arial, sans-serif;
-      border-bottom: 2px dashed #1BAAA6;
-      width: fit-content;
-      margin-left: auto;
-      margin-right: auto;
-      padding-bottom: 2px;
-      transition: color 0.2s, border-color 0.2s;
-    }
-    .forgot:hover {
-      color: #0F3557;
-      border-color: #0F3557;
-    }
-    @media (max-width: 500px) {
-      .signup-card {
-        padding: 18px 4vw 18px 4vw;
-        border-radius: 0;
-      }
-      .signup-title {
-        font-size: 1.3rem;
-        margin-top: 38px;
-      }
-      .signup-logo {
-        width: 54px;
-        height: 54px;
-        top: -27px;
-      }
-    }
+    button[type="submit"]:hover{ background:var(--accent); }
+    .forgot{ margin-top:10px; color:var(--accent); text-decoration:none; display:inline-block; }
   </style>
 </head>
 <body>
   <div class="signup-card">
     <img src="../../../public/img/iDomus_logo.png" alt="iDomus Logo" class="signup-logo">
     <div class="signup-title">Registro</div>
-    <?php if (isset($error)) { echo '<div class="signup-msg">' . $error . '</div>'; } ?>
-    <form id="signupForm" method="POST" action="signup.php" onsubmit="return validarFormulario()">
-      <input type="text" name="nombre" placeholder="Nombre" required>
-      <input type="text" name="apellido" placeholder="Apellido" required>
-      <input type="email" name="correo" placeholder="Email" required>
-      <input type="password" name="password" id="password" placeholder="Contraseña" required minlength="6">
-      <input type="checkbox" onclick="togglePassword('password')"> Mostrar contraseña
-      <input type="password" name="password2" id="password2" placeholder="Repetir contraseña" required minlength="6">
-      <input type="checkbox" onclick="togglePassword('password2')"> Mostrar contraseña
-      <div class="form-group">
-        <div class="g-recaptcha" data-sitekey="6LcUlskrAAAAAHDH6-o6ZXwe6ap0JqGD1ckQHbZI"></div>
+
+    <form method="POST" action="signup.php" onsubmit="return validarFormulario()">
+      <div class="input-group"><input type="text" name="nombre" placeholder="Nombre" required></div>
+      <div class="input-group"><input type="text" name="apellido" placeholder="Apellido" required></div>
+      <div class="input-group"><input type="email" name="correo" placeholder="Correo" required></div>
+
+      <div class="input-group">
+        <input type="password" name="password" id="password" placeholder="Contraseña" required minlength="6">
+        <i class="bi bi-eye toggle-pass" data-target="password" aria-label="Mostrar/Ocultar"></i>
       </div>
+      <div class="input-group">
+        <input type="password" name="password2" id="password2" placeholder="Repetir contraseña" required minlength="6">
+        <i class="bi bi-eye toggle-pass" data-target="password2" aria-label="Mostrar/Ocultar"></i>
+      </div>
+
+      <!-- reCAPTCHA v2 checkbox (obligatorio) -->
+      <div class="g-recaptcha" data-sitekey="<?= htmlspecialchars($RECAPTCHA_SITE_KEY, ENT_QUOTES, 'UTF-8') ?>"></div>
+
       <button type="submit">Registrarse</button>
     </form>
-    <a class="forgot" href="login.php">¿Ya tienes cuenta? Inicia sesión</a>
+
+    <a class="forgot" href="../login/login.php">¿Ya tienes cuenta? Inicia sesión</a>
   </div>
+
   <script>
-        // Mostrar/ocultar contraseña para cualquier campo
-        function togglePassword(inputId) {
-            let pass = document.getElementById(inputId);
-            pass.type = (pass.type === "password") ? "text" : "password";
-        }
+    // Toggle ojo (sin emojis)
+    document.querySelectorAll('.toggle-pass').forEach(icon=>{
+      icon.addEventListener('click', ()=>{
+        const id = icon.getAttribute('data-target');
+        const input = document.getElementById(id);
+        if(!input) return;
+        const showing = input.type === 'text';
+        input.type = showing ? 'password' : 'text';
+        icon.classList.toggle('bi-eye', showing);
+        icon.classList.toggle('bi-eye-slash', !showing);
+      });
+    });
 
-        function validarFormulario() {
-            // Obtener campos
-            let nombre = document.getElementsByName("nombre")[0];
-            let apellido = document.getElementsByName("apellido")[0];
-            let correo = document.getElementsByName("correo")[0];
-            let passInput = document.getElementById("password");
-            let pass2Input = document.getElementById("password2");
-            let recaptchaElem = document.getElementsByName('g-recaptcha-response')[0];
-            let recaptcha = recaptchaElem ? recaptchaElem.value.trim() : '';
+    // Validación cliente (UX extra)
+    function validarFormulario(){
+      const p1 = document.getElementById('password').value;
+      const p2 = document.getElementById('password2').value;
 
-            // Validar campos vacíos
-            if (!nombre.value.trim()) {
-                alert("❌ Debes ingresar tu nombre.");
-                nombre.focus();
-                return false;
-            }
-            if (!apellido.value.trim()) {
-                alert("❌ Debes ingresar tu apellido.");
-                apellido.focus();
-                return false;
-            }
-            if (!correo.value.trim()) {
-                alert("❌ Debes ingresar tu correo electrónico.");
-                correo.focus();
-                return false;
-            }
-            if (!passInput.value.trim()) {
-                alert("❌ Debes ingresar una contraseña.");
-                passInput.focus();
-                return false;
-            }
-            if (!pass2Input.value.trim()) {
-                alert("❌ Debes repetir la contraseña.");
-                pass2Input.focus();
-                return false;
-            }
+      if(p1.length < 6){ Swal.fire({icon:'error',title:'Contraseña muy corta',text:'Mínimo 6 caracteres.'}); return false; }
+      if(!/[A-Z]/.test(p1)){ Swal.fire({icon:'error',title:'Falta mayúscula',text:'Incluye al menos una letra mayúscula.'}); return false; }
+      if(!/[a-z]/.test(p1)){ Swal.fire({icon:'error',title:'Falta minúscula',text:'Incluye al menos una letra minúscula.'}); return false; }
+      if(!/[0-9]/.test(p1)){ Swal.fire({icon:'error',title:'Falta número',text:'Incluye al menos un número.'}); return false; }
+      if(!/[^A-Za-z0-9]/.test(p1)){ Swal.fire({icon:'error',title:'Falta carácter especial',text:'Incluye al menos un carácter especial.'}); return false; }
+      if(p1 !== p2){ Swal.fire({icon:'error',title:'No coinciden',text:'Las contraseñas deben ser iguales.'}); return false; }
 
-            let pass = passInput.value;
-            let pass2 = pass2Input.value;
+      // Google insertará el textarea con el token (si no está, el submit fallará en servidor).
+      return true;
+    }
 
-            // Validar longitud mínima
-            if (pass.length < 6) {
-                alert("❌ La contraseña debe tener al menos 6 caracteres.");
-                passInput.focus();
-                return false;
-            }
-
-            // Validar mayúscula
-            if (!/[A-Z]/.test(pass)) {
-                alert("❌ La contraseña debe incluir al menos una letra mayúscula.");
-                passInput.focus();
-                return false;
-            }
-            // Validar minúscula
-            if (!/[a-z]/.test(pass)) {
-                alert("❌ La contraseña debe incluir al menos una letra minúscula.");
-                passInput.focus();
-                return false;
-            }
-            // Validar número
-            if (!/[0-9]/.test(pass)) {
-                alert("❌ La contraseña debe incluir al menos un número.");
-                passInput.focus();
-                return false;
-            }
-            // Validar carácter especial
-            if (!/[^A-Za-z0-9]/.test(pass)) {
-                alert("❌ La contraseña debe incluir al menos un carácter especial.");
-                passInput.focus();
-                return false;
-            }
-
-            // Validar coincidencia
-            if (pass !== pass2) {
-                alert("❌ Las contraseñas no coinciden.");
-                pass2Input.focus();
-                return false;
-            }
-
-            // Verificar que reCAPTCHA esté completado
-            function onClick(e) {
-              e.preventDefault();
-              grecaptcha.enterprise.ready(async () => {
-                const token = await grecaptcha.enterprise.execute('6Le4VckrAAAAALFhjEBwqo_44tyiWIVP7Mw5UM0H', {action: 'LOGIN'});
-              });
-            }
-
-            return true;
-        }
-    </script>
+    // SweetAlert desde PHP
+    <?php if ($swal): ?>
+      Swal.fire({
+        icon: '<?= $swal['icon'] ?>',
+        title: '<?= addslashes($swal['title']) ?>',
+        text: '<?= addslashes($swal['text']) ?>',
+        confirmButtonText: 'Aceptar'
+      }).then(()=>{ <?php if(!empty($swal['redirect'])): ?> window.location.href='<?= $swal['redirect'] ?>'; <?php endif; ?> });
+    <?php endif; ?>
+  </script>
 </body>
 </html>
