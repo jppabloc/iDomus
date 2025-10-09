@@ -144,7 +144,7 @@ foreach ($period as $dt) {
     </button>
     <span class="brand-badge">iDomus · Dashboard</span>
     <div class="d-flex align-items-center gap-2">
-      <a href="../home/home.php" class="btn btn-sm btn-outline-light"><i class="bi bi-house-door"></i> Home</a>
+      <!-- <a href="../home/home.php" class="btn btn-sm btn-outline-light"><i class="bi bi-house-door"></i> Home</a> -->
       <a href="../login/login.php?logout=1" class="btn btn-sm btn-outline-light"><i class="bi bi-box-arrow-right"></i> Salir</a>
     </div>
   </div>
@@ -162,7 +162,7 @@ foreach ($period as $dt) {
       <a href="finanzas.php"  class="btn btn-outline-primary"><i class="bi bi-cash-coin me-1"></i> Finanzas</a>
       <a href="consumos.php"  class="btn btn-outline-primary"><i class="bi bi-lightning-charge me-1"></i> Consumos</a>
       <a href="morosidad.php" class="btn btn-outline-primary"><i class="bi bi-exclamation-octagon me-1"></i> Morosidad</a>
-      <a href="../usuarios/usuarios.php" class="btn btn-outline-primary"><i class="bi bi-people me-1"></i> Usuarios</a>
+      <a href="usuarios.php" class="btn btn-outline-primary"><i class="bi bi-people me-1"></i> Usuarios</a>
     </div>
   </div>
 </div>
@@ -183,7 +183,7 @@ foreach ($period as $dt) {
           <div class="icon"><i class="bi bi-people"></i></div>
         </div>
         <div class="mt-3">
-          <a href="../usuarios/usuarios.php" class="btn btn-sm btn-domus">Gestionar</a>
+          <a href="usuarios.php" class="btn btn-sm btn-domus">Gestionar</a>
         </div>
       </div>
     </div>
@@ -271,7 +271,7 @@ foreach ($period as $dt) {
           <a href="finanzas.php"  class="btn btn-outline-primary"><i class="bi bi-cash-stack me-1"></i> Finanzas</a>
           <a href="consumos.php"  class="btn btn-outline-primary"><i class="bi bi-lightning me-1"></i> Consumos</a>
           <a href="morosidad.php" class="btn btn-outline-primary"><i class="bi bi-clipboard-x me-1"></i> Morosidad</a>
-          <a href="../usuarios/usuarios.php" class="btn btn-outline-primary"><i class="bi bi-people me-1"></i> Usuarios</a>
+          <a href="usuarios.php" class="btn btn-outline-primary"><i class="bi bi-people me-1"></i> Usuarios</a>
         </div>
       </div>
     </div>

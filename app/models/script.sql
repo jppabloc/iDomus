@@ -344,6 +344,12 @@ ALTER TABLE "auditoria" ADD FOREIGN KEY ("id_usuario") REFERENCES "usuario" ("id
 ALTER TABLE "configuracion_sistema" ADD FOREIGN KEY ("id_usuario") REFERENCES "usuario" ("iduser") ON DELETE CASCADE;
 
 
+-- add admin
+INSERT INTO usuario (nombre, apellido, correo, contraseña, verificado)
+VALUES ('Admin','Root','admin@admin', '<hash>', true);
+
+-- Generar hash en PHP:
+-- echo password_hash('admin', PASSWORD_DEFAULT);
 
 
 
