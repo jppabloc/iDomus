@@ -9,7 +9,7 @@ Permite administrar usuarios, pagos, mantenimientos, consumos y servicios del co
 
 - **Materia:** INF-281 — *Taller de Sistemas de Información*  
 - **Docente:** Lic. Brígida Carvajal  
-- **Universidad:** Universidad Pública de El Alto (UPEA)
+- **Universidad:** UMSA
 
 ---
 
@@ -17,12 +17,10 @@ Permite administrar usuarios, pagos, mantenimientos, consumos y servicios del co
 
 | Integrante | Rol principal |
 |-------------|----------------|
-| 🧑‍💻 Juan Pablo Calderón Pancata | Líder de proyecto / Desarrollador Fullstack |
-| 👩‍💻 Integrante 2 | Frontend Developer |
-| 👨‍💻 Integrante 3 | Backend Developer |
-| 👩‍🔧 Integrante 4 | QA / Tester |
-
-> *(Puedes reemplazar los nombres y roles según tu equipo real)*
+| 👩‍💻 Favio | Frontend Developer |
+| 👨‍💻 Dieguinio | Backend Developer |
+| 👩‍🔧 Alejandrus | QA / Tester |
+| 🧑‍💻 Juan Pablo Calderón Pancata | Desarrollador Fullstack |
 
 ---
 
@@ -35,14 +33,12 @@ Permite administrar usuarios, pagos, mantenimientos, consumos y servicios del co
 
 ### ⚙️ **Backend**
 - PHP 8+  
-- MySQL / PostgreSQL  
 - Arquitectura MVC  
 - Autenticación con manejo de sesiones y roles  
-- Seguridad con *rate limiting* y verificación de cuenta  
 
 ### 📱 **Aplicación móvil**
 - Android Studio  
-- Kotlin / Java  
+- Kotlin 
 - Consumo de API PHP vía `OkHttp`  
 - Autenticación remota (login móvil)
 
