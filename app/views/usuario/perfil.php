@@ -234,7 +234,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
 <nav class="navbar navbar-expand-lg sticky-top">
   <div class="container-xxl">
     <a class="navbar-brand" href="../../public/index.php">
-      <img src="../../public/img/iDomus_logo.png" class="brand-logo" alt="iDomus">
+      <img src="../../../public/img/iDomus_logo.png" class="brand-logo" alt="iDomus">
       <span>iDomus</span>
     </a>
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMain">

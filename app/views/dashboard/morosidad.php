@@ -3,135 +3,665 @@
 session_start();
 require_once '../../models/conexion.php';
 
+// ====== Guardas: solo ADMIN ======
 if (empty($_SESSION['iduser']) || ($_SESSION['rol'] ?? '') !== 'admin') {
   header('Location: ../login/login.php');
   exit;
 }
 
-// Marcar como pagada (acción rápida)
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['marcar_pagado'], $_POST['id_cuota'])) {
-  $id = (int)$_POST['id_cuota'];
-  $st = $conexion->prepare("UPDATE cuota_mantenimiento SET estado='PAGADO' WHERE id_cuota=:id");
-  $st->execute([':id'=>$id]);
-  header('Location: morosidad.php?ok=1');
+function json_out($ok, $msg = '', $extra = []) {
+  header('Content-Type: application/json; charset=UTF-8');
+  echo json_encode(array_merge(['success'=>$ok, 'message'=>$msg], $extra));
   exit;
 }
 
-/** Listado de morosidad con NOMBRE del residente principal */
-$sql = "
-SELECT 
-  cm.id_cuota,
-  cm.concepto,
-  cm.monto,
-  cm.fecha_generacion,
-  cm.fecha_vencimiento,
-  UPPER(cm.estado) AS estado,
-  u.nro_unidad,
-  b.nombre  AS bloque,
-  e.nombre  AS edificio,
-  COALESCE(res.nombre || ' ' || res.apellido, '(Sin residente)') AS residente,
-  GREATEST(0, (CURRENT_DATE - cm.fecha_vencimiento))::int AS dias_atraso
-FROM cuota_mantenimiento cm
-JOIN unidad   u ON u.id_unidad = cm.id_unidad
-JOIN bloque   b ON b.id_bloque = u.id_bloque
-JOIN edificio e ON e.id_edificio = b.id_edificio
-LEFT JOIN LATERAL (
-  SELECT uu.*
-  FROM residente_unidad ru 
-  JOIN usuario uu ON uu.iduser = ru.id_usuario
-  WHERE ru.id_unidad = u.id_unidad
-  ORDER BY CASE WHEN ru.tipo_residencia='PROPIETARIO' THEN 0 ELSE 1 END, uu.iduser
-  LIMIT 1
-) AS res ON true
-WHERE UPPER(cm.estado) = 'PENDIENTE'
-ORDER BY cm.fecha_vencimiento ASC, e.nombre, b.nombre, u.nro_unidad
+function audit(PDO $db, int $iduser, string $accion, string $modulo = 'morosidad') {
+  try {
+    $db->prepare("INSERT INTO auditoria (id_usuario, accion, ip_origen, modulo) VALUES (:u,:a,:ip,:m)")
+       ->execute([
+         ':u'=>$iduser, ':a'=>$accion,
+         ':ip'=>($_SERVER['REMOTE_ADDR'] ?? 'n/a'),
+         ':m'=>$modulo
+       ]);
+  } catch (\Throwable $e) {}
+}
+
+function get_user_email(PDO $db, int $iduser): ?string {
+  $st = $db->prepare("SELECT correo FROM usuario WHERE iduser=:id LIMIT 1");
+  $st->execute([':id'=>$iduser]);
+  return $st->fetchColumn() ?: null;
+}
+
+function get_user_name(PDO $db, int $iduser): string {
+  $st = $db->prepare("SELECT CONCAT(nombre,' ',apellido) FROM usuario WHERE iduser=:id LIMIT 1");
+  $st->execute([':id'=>$iduser]);
+  return $st->fetchColumn() ?: 'Usuario';
+}
+
+function send_receipt_email(PDO $db, int $id_pago): void {
+  $sql = "SELECT p.id_pago, p.monto, p.fecha_pago, p.concepto, p.estado,
+                 u.iduser, u.nombre, u.apellido, u.correo
+          FROM pago p
+          JOIN usuario u ON u.iduser = p.id_usuario
+          WHERE p.id_pago = :id LIMIT 1";
+  $st = $db->prepare($sql);
+  $st->execute([':id'=>$id_pago]);
+  $row = $st->fetch(PDO::FETCH_ASSOC);
+  if (!$row) return;
+
+  $nombre = htmlspecialchars($row['nombre'].' '.$row['apellido']);
+  $monto  = number_format((float)$row['monto'],2);
+  $fecha  = htmlspecialchars($row['fecha_pago']);
+  $concepto = htmlspecialchars($row['concepto'] ?: 'Pago de cuota');
+  $correo = $row['correo'];
+
+  $asunto = "iDomus - Recibo de pago #".$row['id_pago'];
+  $html = '
+  <!doctype html><html><head><meta charset="utf-8"><style>
+    body{font-family:Arial,sans-serif;background:#f4f6f8;padding:16px;}
+    .card{max-width:560px;margin:auto;background:#fff;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.09);padding:18px;}
+    .hdr{background:#023047;color:#fff;padding:14px;border-radius:10px;font-weight:700;}
+    .row{margin:10px 0;}
+    .foot{color:#6c7a89;font-size:12px;margin-top:12px;text-align:center;}
+  </style></head>
+  <body>
+    <div class="card">
+      <div class="hdr">Recibo de pago iDomus</div>
+      <p>Hola <b>'.$nombre.'</b>, te confirmamos el registro de tu pago.</p>
+      <div class="row"><b>Concepto:</b> '.$concepto.'</div>
+      <div class="row"><b>Monto:</b> Bs '.$monto.'</div>
+      <div class="row"><b>Fecha:</b> '.$fecha.'</div>
+      <div class="foot">&copy; '.date('Y')." iDomus".'</div>
+    </div>
+  </body></html>';
+
+  $headers  = "MIME-Version: 1.0\r\n";
+  $headers .= "Content-type: text/html; charset=UTF-8\r\n";
+  $headers .= "From: iDomus <noreply@idomus.com>\r\n";
+
+  @mail($correo, $asunto, $html, $headers);
+}
+
+// ====== AJAX: crear cuota / registrar pago ======
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax'])) {
+  $action  = $_POST['action'] ?? '';
+  $adminId = (int)($_SESSION['iduser'] ?? 0);
+
+  // ---- Crear cuota pendiente ----
+  if ($action === 'add_quota') {
+    $iduser           = (int)($_POST['iduser'] ?? 0);
+    $id_unidad        = (int)($_POST['id_unidad'] ?? 0);
+    $concepto         = strtoupper(trim($_POST['concepto'] ?? 'OTROS'));
+    $monto            = (float)($_POST['monto']  ?? 0);
+    $fecha_gen        = $_POST['fecha_generacion']   ?? date('Y-m-d');
+    $fecha_venc       = $_POST['fecha_vencimiento']  ?? date('Y-m-d');
+
+    if ($iduser <= 0 || $id_unidad <= 0 || $monto <= 0) {
+      json_out(false, 'Datos inválidos (usuario, unidad y monto son obligatorios).');
+    }
+    if (!in_array($concepto, ['AGUA','ENERGIA','OTROS'], true)) {
+      $concepto = 'OTROS';
+    }
+
+    try {
+      $sql = "INSERT INTO cuota_mantenimiento (id_unidad, monto, fecha_generacion, fecha_vencimiento, estado, concepto)
+              VALUES (:u, :m, :fg, :fv, 'PENDIENTE', :c)";
+      $ok = $conexion->prepare($sql)->execute([
+        ':u'=>$id_unidad, ':m'=>$monto, ':fg'=>$fecha_gen, ':fv'=>$fecha_venc, ':c'=>$concepto
+      ]);
+      if (!$ok) throw new Exception('No se pudo crear la cuota.');
+      audit($conexion, $adminId, "Creó cuota PENDIENTE (concepto=$concepto) para user #$iduser unidad #$id_unidad por Bs $monto");
+      json_out(true, 'Cuota creada correctamente.');
+    } catch (\Throwable $e) {
+      json_out(false, 'Error: '.$e->getMessage());
+    }
+  }
+
+  // ---- Registrar pago (marcar cuota como PAGADO y crear registro pago) ----
+  if ($action === 'pay_quota') {
+    $id_cuota = (int)($_POST['id_cuota'] ?? 0);
+    if ($id_cuota <= 0) json_out(false, 'ID de cuota inválido.');
+
+    // Cargar cuota + usuario (por unidad)
+    $sql = "SELECT c.id_cuota, c.id_unidad, c.monto, c.fecha_vencimiento, c.estado, c.concepto,
+                   ru.id_usuario
+            FROM cuota_mantenimiento c
+            JOIN residente_unidad ru ON ru.id_unidad = c.id_unidad
+            WHERE c.id_cuota = :id
+            LIMIT 1";
+    $st = $conexion->prepare($sql);
+    $st->execute([':id'=>$id_cuota]);
+    $cuota = $st->fetch(PDO::FETCH_ASSOC);
+
+    if (!$cuota) json_out(false, 'Cuota no encontrada.');
+    if (strtoupper($cuota['estado']) !== 'PENDIENTE') json_out(false, 'La cuota ya no está pendiente.');
+
+    $id_usuario = (int)$cuota['id_usuario'];
+    $monto      = (float)$cuota['monto'];
+    $concepto   = 'Pago de '.$cuota['concepto'].' (cuota #'.$id_cuota.')';
+
+    try {
+      $conexion->beginTransaction();
+
+      // 1) Marcar cuota como PAGADO
+      $conexion->prepare("UPDATE cuota_mantenimiento SET estado='PAGADO' WHERE id_cuota=:id")
+               ->execute([':id'=>$id_cuota]);
+
+      // 2) Crear registro en pago
+      $conexion->prepare("INSERT INTO pago (id_usuario, monto, fecha_pago, concepto, estado)
+                          VALUES (:u, :m, CURRENT_DATE, :c, 'PAGADO')")
+               ->execute([':u'=>$id_usuario, ':m'=>$monto, ':c'=>$concepto]);
+
+      $id_pago = (int)$conexion->query("SELECT LASTVAL()")->fetchColumn();
+
+      $conexion->commit();
+
+      audit($conexion, $adminId, "Registró pago id_pago=$id_pago por cuota id_cuota=$id_cuota, Bs $monto");
+
+      // 3) Enviar recibo (HTML) por correo
+      send_receipt_email($conexion, $id_pago);
+
+      json_out(true, 'Pago registrado y recibo enviado.');
+    } catch (\Throwable $e) {
+      if ($conexion->inTransaction()) $conexion->rollBack();
+      json_out(false, 'Error: '.$e->getMessage());
+    }
+  }
+
+  json_out(false, 'Acción inválida.');
+}
+
+// ====== Filtros ======
+$q        = trim($_GET['q'] ?? '');
+$desde    = $_GET['desde'] ?? '';
+$hasta    = $_GET['hasta'] ?? '';
+$estado   = strtoupper(trim($_GET['estado'] ?? 'PENDIENTE')); // PENDIENTE|TODOS
+$fconcept = strtoupper(trim($_GET['concepto'] ?? 'TODOS'));   // AGUA|ENERGIA|OTROS|TODOS
+
+$where = [];
+$params = [];
+
+if ($estado !== 'TODOS') {
+  $where[] = "UPPER(c.estado) = 'PENDIENTE'";
+}
+if ($fconcept !== 'TODOS') {
+  $where[] = "UPPER(c.concepto) = :cn";
+  $params[':cn'] = $fconcept;
+}
+if ($q !== '') {
+  $where[] = "(LOWER(u.nombre) LIKE :q OR LOWER(u.apellido) LIKE :q OR LOWER(u.correo) LIKE :q OR LOWER(un.nro_unidad) LIKE :q)";
+  $params[':q'] = '%'.strtolower($q).'%';
+}
+if ($desde !== '') {
+  $where[] = "c.fecha_vencimiento >= :desde";
+  $params[':desde'] = $desde;
+}
+if ($hasta !== '') {
+  $where[] = "c.fecha_vencimiento <= :hasta";
+  $params[':hasta'] = $hasta;
+}
+$whereSQL = $where ? ('WHERE '.implode(' AND ', $where)) : '';
+
+// Consulta base
+$sqlList = "
+  SELECT 
+    c.id_cuota, c.monto, c.fecha_generacion, c.fecha_vencimiento, c.estado, c.concepto,
+    u.iduser, u.nombre, u.apellido, u.correo,
+    un.id_unidad, un.nro_unidad, b.nombre AS bloque, e.nombre AS edificio
+  FROM cuota_mantenimiento c
+  JOIN unidad un    ON un.id_unidad = c.id_unidad
+  JOIN bloque b     ON b.id_bloque  = un.id_bloque
+  JOIN edificio e   ON e.id_edificio= b.id_edificio
+  JOIN residente_unidad ru ON ru.id_unidad = un.id_unidad
+  JOIN usuario u    ON u.iduser = ru.id_usuario
+  $whereSQL
+  ORDER BY c.fecha_vencimiento ASC, c.id_cuota ASC
 ";
-$rows = $conexion->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+$st = $conexion->prepare($sqlList);
+$st->execute($params);
+$rows = $st->fetchAll(PDO::FETCH_ASSOC);
+
+// ====== Export CSV / PDF ======
+if (isset($_GET['export']) && $_GET['export'] === 'csv') {
+  header('Content-Type: text/csv; charset=UTF-8');
+  header('Content-Disposition: attachment; filename="morosidad.csv"');
+  echo "\xEF\xBB\xBF";
+  $out = fopen('php://output', 'w');
+  fputcsv($out, ['CuotaID','Usuario','Correo','Unidad','Edificio','Bloque','Concepto','Monto','Vence','Estado'], ',');
+  foreach ($rows as $r) {
+    fputcsv($out, [
+      $r['id_cuota'],
+      $r['nombre'].' '.$r['apellido'],
+      $r['correo'],
+      $r['nro_unidad'],
+      $r['edificio'],
+      $r['bloque'],
+      $r['concepto'],
+      number_format((float)$r['monto'],2,'.',''),
+      $r['fecha_vencimiento'],
+      $r['estado']
+    ], ',');
+  }
+  fclose($out);
+  exit;
+}
+
+if (isset($_GET['export']) && $_GET['export'] === 'pdf') {
+  ?>
+  <!doctype html><html lang="es"><head>
+    <meta charset="utf-8"><title>Morosidad · iDomus</title>
+    <style>
+      body{font-family:Arial, sans-serif; padding:16px;}
+      h2{margin:0 0 10px;}
+      table{width:100%; border-collapse:collapse;}
+      th,td{border:1px solid #999; padding:6px; font-size:12px;}
+      th{background:#eee;}
+      .muted{color:#666; font-size:12px;}
+    </style>
+  </head><body>
+    <h2>Reporte de Morosidad</h2>
+    <div class="muted">Generado: <?= date('Y-m-d H:i') ?> · Filtros: 
+      <?= $q ? "q='$q' " : '' ?>
+      <?= $desde ? "desde=$desde " : '' ?>
+      <?= $hasta ? "hasta=$hasta " : '' ?>
+      estado=<?= $estado ?> · concepto=<?= $fconcept ?>
+    </div>
+    <br>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>Usuario</th><th>Correo</th><th>Unidad</th><th>Edificio</th><th>Bloque</th>
+          <th>Concepto</th><th>Monto (Bs)</th><th>Vence</th><th>Estado</th>
+        </tr>
+      </thead>
+      <tbody>
+        <?php foreach($rows as $r): ?>
+        <tr>
+          <td><?= (int)$r['id_cuota'] ?></td>
+          <td><?= htmlspecialchars($r['nombre'].' '.$r['apellido']) ?></td>
+          <td><?= htmlspecialchars($r['correo']) ?></td>
+          <td><?= htmlspecialchars($r['nro_unidad']) ?></td>
+          <td><?= htmlspecialchars($r['edificio']) ?></td>
+          <td><?= htmlspecialchars($r['bloque']) ?></td>
+          <td><?= htmlspecialchars($r['concepto']) ?></td>
+          <td style="text-align:right;"><?= number_format((float)$r['monto'],2) ?></td>
+          <td><?= htmlspecialchars($r['fecha_vencimiento']) ?></td>
+          <td><?= htmlspecialchars($r['estado']) ?></td>
+        </tr>
+        <?php endforeach; ?>
+        <?php if (!$rows): ?>
+          <tr><td colspan="10" style="text-align:center;color:#666;">Sin datos</td></tr>
+        <?php endif; ?>
+      </tbody>
+    </table>
+    <script>window.print()</script>
+  </body></html>
+  <?php
+  exit;
+}
+
+// ====== Datos para UI ======
+$nombreAdmin = $_SESSION['nombre'] ?? 'Admin';
+$rolAdmin    = $_SESSION['rol'] ?? 'admin';
+
+// Lista de usuarios (para el modal)
+$usuariosList = $conexion->query("
+  SELECT iduser, CONCAT(nombre,' ',apellido) AS nom, correo
+  FROM usuario
+  ORDER BY nom ASC
+")->fetchAll(PDO::FETCH_ASSOC);
+
+// Mapa de unidades por usuario (para poblar select dinámico)
+$unitsByUser = [];
+$qr = $conexion->query("
+  SELECT ru.id_usuario, un.id_unidad, un.nro_unidad, b.nombre AS bloque, e.nombre AS edificio
+  FROM residente_unidad ru
+  JOIN unidad un ON un.id_unidad = ru.id_unidad
+  JOIN bloque b ON b.id_bloque = un.id_bloque
+  JOIN edificio e ON e.id_edificio = b.id_edificio
+  ORDER BY ru.id_usuario, e.nombre, b.nombre, un.nro_unidad
+");
+while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
+  $uid = (int)$x['id_usuario'];
+  $unitsByUser[$uid][] = [
+    'id_unidad'=>(int)$x['id_unidad'],
+    'label'=>$x['edificio'].' · '.$x['bloque'].' · '.$x['nro_unidad']
+  ];
+}
+
 ?>
-<!DOCTYPE html>
+<!doctype html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta charset="utf-8">
   <title>iDomus · Morosidad</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"/>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet"/>
   <style>
-    :root { --accent:#1BAAA6; --dark:#0F3557; }
-    body { background:#f7fafd; font-family: 'Segoe UI', Arial, sans-serif; }
-    .navbar { background:#023047; }
-    .container-xxl { max-width: 1100px; }
-    .card { border:none; border-radius:16px; box-shadow:0 6px 24px rgba(0,0,0,.08); }
-    .table thead th { background:var(--accent); color:#fff; border:none; }
-    .btn-domus { background:var(--dark); color:#fff; border:none; border-radius:10px; font-weight:600; }
-    .btn-domus:hover { background:var(--accent); }
+    :root{ --accent:#1BAAA6; --dark:#0F3557; }
+    body{ background:#f7fafd; font-family:'Segoe UI', Arial, sans-serif; }
+    .navbar{ background:#023047; }
+    .brand-badge{ color:#fff; font-weight:700; }
+    .container-xxl{ max-width:1200px; }
+    .card-box{ border:none; border-radius:16px; box-shadow:0 6px 24px rgba(0,0,0,.08); }
+    .btn-domus{ background:var(--dark); color:#fff; border:none; border-radius:10px; }
+    .btn-domus:hover{ background:var(--accent); }
+    .badge-chip{ background:#e9f7f6; color:#0F3557; border-radius:20px; padding:.25rem .6rem; font-weight:600; }
   </style>
 </head>
 <body>
-
-<nav class="navbar navbar-dark sticky-top shadow-sm">
+<!-- Navbar -->
+<nav class="navbar navbar-dark sticky-top shadow-sm mb-3">
   <div class="container-fluid">
-    <a class="navbar-brand" href="dashboard.php"><i class="bi bi-arrow-left-circle"></i> Dashboard</a>
-    <span class="navbar-text text-white">Morosidad</span>
-    <a class="btn btn-sm btn-outline-light" href="../login/login.php?logout=1"><i class="bi bi-box-arrow-right"></i> Salir</a>
+    <a href="dashboard.php" class="btn btn-outline-light me-2"><i class="bi bi-arrow-left"></i> Volver</a>
+    <span class="brand-badge">iDomus · Morosidad</span>
+    <div class="d-flex align-items-center gap-2">
+      <span class="badge-chip d-none d-sm-inline-flex align-items-center gap-1">
+        <i class="bi bi-person-circle" style="color:#1BAAA6"></i>
+        <?= htmlspecialchars($nombreAdmin) ?> · <?= htmlspecialchars(ucfirst($rolAdmin)) ?>
+      </span>
+      <a href="../login/login.php?logout=1" class="btn btn-sm btn-outline-light">
+        <i class="bi bi-box-arrow-right"></i> Salir
+      </a>
+    </div>
   </div>
 </nav>
 
-<div class="container-xxl my-4">
-  <div class="card p-3">
-    <div class="d-flex justify-content-between align-items-center">
-      <h5 class="mb-0">Cuotas pendientes</h5>
-      <div class="d-flex gap-2">
-        <a href="export_morosidad.php?fmt=excel" class="btn btn-sm btn-outline-success"><i class="bi bi-file-earmark-excel"></i> Excel</a>
-        <a href="export_morosidad.php?fmt=pdf"   class="btn btn-sm btn-outline-danger"><i class="bi bi-file-earmark-pdf"></i> PDF</a>
+<div class="container-xxl">
+  <!-- Filtros -->
+  <div class="card card-box p-3 mb-3">
+    <form class="row g-2 align-items-end" method="get">
+      <div class="col-12 col-md-3">
+        <label class="form-label">Buscar (usuario/correo/unidad)</label>
+        <input type="text" name="q" class="form-control" value="<?= htmlspecialchars($q) ?>" placeholder="Ej. Juan, A-101">
       </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label">Desde (venc.)</label>
+        <input type="date" name="desde" class="form-control" value="<?= htmlspecialchars($desde) ?>">
+      </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label">Hasta (venc.)</label>
+        <input type="date" name="hasta" class="form-control" value="<?= htmlspecialchars($hasta) ?>">
+      </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label">Estado</label>
+        <select name="estado" class="form-select">
+          <option value="PENDIENTE" <?= $estado==='PENDIENTE'?'selected':'' ?>>Pendiente</option>
+          <option value="TODOS"     <?= $estado==='TODOS'?'selected':'' ?>>Todos</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label">Concepto</label>
+        <select name="concepto" class="form-select">
+          <option value="TODOS"   <?= $fconcept==='TODOS'?'selected':'' ?>>Todos</option>
+          <option value="AGUA"    <?= $fconcept==='AGUA'?'selected':'' ?>>Agua</option>
+          <option value="ENERGIA" <?= $fconcept==='ENERGIA'?'selected':'' ?>>Energía</option>
+          <option value="OTROS"   <?= $fconcept==='OTROS'?'selected':'' ?>>Otros</option>
+        </select>
+      </div>
+      <div class="col-12 col-md-1">
+        <button class="btn btn-domus w-100"><i class="bi bi-filter"></i></button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Acciones -->
+  <div class="card card-box p-3 mb-3">
+    <div class="d-flex flex-wrap gap-2">
+      <button class="btn btn-domus" data-bs-toggle="modal" data-bs-target="#modalAddQuota">
+        <i class="bi bi-plus-circle"></i> Agregar cuota por pagar
+      </button>
+      <a class="btn btn-outline-success ms-auto" href="?<?= http_build_query(array_merge($_GET,['export'=>'csv'])) ?>">
+        <i class="bi bi-file-earmark-spreadsheet"></i> Excel (CSV)
+      </a>
+      <a class="btn btn-outline-danger" href="?<?= http_build_query(array_merge($_GET,['export'=>'pdf'])) ?>" target="_blank">
+        <i class="bi bi-filetype-pdf"></i> PDF
+      </a>
     </div>
-    <div class="table-responsive mt-3">
-      <table class="table table-bordered align-middle">
+  </div>
+
+  <!-- Tabla -->
+  <div class="card card-box p-3">
+    <div class="table-responsive">
+      <table class="table table-hover align-middle">
         <thead>
           <tr>
-            <th>Residente</th>
+            <th>#</th>
+            <th>Usuario</th>
+            <th>Correo</th>
             <th>Unidad</th>
-            <th>Bloque</th>
             <th>Edificio</th>
+            <th>Bloque</th>
             <th>Concepto</th>
-            <th>Monto (Bs)</th>
-            <th>Generada</th>
+            <th class="text-end">Monto (Bs)</th>
             <th>Vence</th>
-            <th>Atraso (días)</th>
-            <th>Acción</th>
+            <th>Estado</th>
+            <th style="width:160px;">Acciones</th>
           </tr>
         </thead>
         <tbody>
+          <?php foreach($rows as $r): ?>
+          <tr data-id="<?= (int)$r['id_cuota'] ?>">
+            <td><?= (int)$r['id_cuota'] ?></td>
+            <td><?= htmlspecialchars($r['nombre'].' '.$r['apellido']) ?></td>
+            <td><?= htmlspecialchars($r['correo']) ?></td>
+            <td><?= htmlspecialchars($r['nro_unidad']) ?></td>
+            <td><?= htmlspecialchars($r['edificio']) ?></td>
+            <td><?= htmlspecialchars($r['bloque']) ?></td>
+            <td>
+              <?php
+                $tag = 'secondary';
+                if (strtoupper($r['concepto'])==='AGUA') $tag='info';
+                if (strtoupper($r['concepto'])==='ENERGIA') $tag='warning';
+              ?>
+              <span class="badge bg-<?= $tag ?>"><?= htmlspecialchars($r['concepto']) ?></span>
+            </td>
+            <td class="text-end"><?= number_format((float)$r['monto'],2) ?></td>
+            <td><?= htmlspecialchars($r['fecha_vencimiento']) ?></td>
+            <td>
+              <?php if (strtoupper($r['estado'])==='PENDIENTE'): ?>
+                <span class="badge bg-warning text-dark">Pendiente</span>
+              <?php else: ?>
+                <span class="badge bg-success">Pagado</span>
+              <?php endif; ?>
+            </td>
+            <td>
+              <?php if (strtoupper($r['estado'])==='PENDIENTE'): ?>
+                <button class="btn btn-sm btn-outline-success btn-pay"
+                        data-id="<?= (int)$r['id_cuota'] ?>"
+                        data-monto="<?= (float)$r['monto'] ?>"
+                        data-user="<?= htmlspecialchars($r['nombre'].' '.$r['apellido']) ?>"
+                        data-bs-toggle="modal" data-bs-target="#modalPay">
+                  <i class="bi bi-cash-coin"></i> Pagar
+                </button>
+              <?php else: ?>
+                <span class="text-muted small">—</span>
+              <?php endif; ?>
+            </td>
+          </tr>
+          <?php endforeach; ?>
           <?php if (!$rows): ?>
-            <tr><td colspan="10" class="text-center text-muted">Sin cuotas pendientes</td></tr>
-          <?php else: foreach ($rows as $r): ?>
-            <tr>
-              <td><?= htmlspecialchars($r['residente']) ?></td>
-              <td><?= htmlspecialchars($r['nro_unidad']) ?></td>
-              <td><?= htmlspecialchars($r['bloque']) ?></td>
-              <td><?= htmlspecialchars($r['edificio']) ?></td>
-              <td><?= htmlspecialchars($r['concepto'] ?: 'Cuota Mantenimiento') ?></td>
-              <td class="text-end"><?= number_format((float)$r['monto'], 2) ?></td>
-              <td><?= htmlspecialchars($r['fecha_generacion']) ?></td>
-              <td><?= htmlspecialchars($r['fecha_vencimiento']) ?></td>
-              <td class="text-center"><?= (int)$r['dias_atraso'] ?></td>
-              <td>
-                <form method="POST" class="d-inline">
-                  <input type="hidden" name="id_cuota" value="<?= (int)$r['id_cuota'] ?>">
-                  <button name="marcar_pagado" class="btn btn-sm btn-success"
-                          onclick="return confirm('¿Marcar esta cuota como PAGADA?')">
-                    <i class="bi bi-check2-circle"></i>
-                  </button>
-                </form>
-              </td>
-            </tr>
-          <?php endforeach; endif; ?>
+            <tr><td colspan="11" class="text-center text-muted">No hay datos</td></tr>
+          <?php endif; ?>
         </tbody>
       </table>
     </div>
   </div>
 </div>
 
+<!-- MODAL: Agregar cuota -->
+<div class="modal fade" id="modalAddQuota" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <form class="modal-content" id="formAddQuota">
+      <div class="modal-header">
+        <h5 class="modal-title">Nueva cuota por pagar</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="alertAdd" class="alert d-none"></div>
+        <input type="hidden" name="ajax" value="1">
+        <input type="hidden" name="action" value="add_quota">
+
+        <div class="mb-2">
+          <label class="form-label">Usuario</label>
+          <select class="form-select" name="iduser" id="aq_user" required>
+            <option value="">Selecciona...</option>
+            <?php foreach($usuariosList as $u): ?>
+              <option value="<?= (int)$u['iduser'] ?>">
+                <?= htmlspecialchars($u['nom']) ?> (<?= htmlspecialchars($u['correo']) ?>)
+              </option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+
+        <div class="mb-2">
+          <label class="form-label">Unidad</label>
+          <select class="form-select" name="id_unidad" id="aq_unidad" required>
+            <option value="">Selecciona un usuario...</option>
+          </select>
+          <div class="form-text">Un usuario puede tener varias unidades. Selecciona a cuál aplicar.</div>
+        </div>
+
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label">Concepto</label>
+            <select class="form-select" name="concepto" required>
+              <option value="AGUA">Agua</option>
+              <option value="ENERGIA">Energía</option>
+              <option value="OTROS" selected>Otros</option>
+            </select>
+          </div>
+          <div class="col-6">
+            <label class="form-label">Monto (Bs)</label>
+            <input type="number" step="0.01" min="0.1" class="form-control" name="monto" required>
+          </div>
+        </div>
+
+        <div class="row mt-2">
+          <div class="col">
+            <label class="form-label">Generación</label>
+            <input type="date" class="form-control" name="fecha_generacion" value="<?= date('Y-m-d') ?>">
+          </div>
+          <div class="col">
+            <label class="form-label">Vencimiento</label>
+            <input type="date" class="form-control" name="fecha_vencimiento" value="<?= date('Y-m-d', strtotime('+10 days')) ?>">
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button class="btn btn-domus" type="submit">Crear</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- MODAL: Registrar pago -->
+<div class="modal fade" id="modalPay" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <form class="modal-content" id="formPay">
+      <div class="modal-header">
+        <h5 class="modal-title">Registrar pago</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="alertPay" class="alert d-none"></div>
+        <input type="hidden" name="ajax" value="1">
+        <input type="hidden" name="action" value="pay_quota">
+        <input type="hidden" name="id_cuota" id="pay_id_cuota" value="0">
+
+        <div class="mb-2">
+          <label class="form-label">Usuario</label>
+          <input type="text" class="form-control" id="pay_user" disabled>
+        </div>
+        <div class="mb-2">
+          <label class="form-label">Monto (Bs)</label>
+          <input type="text" class="form-control" id="pay_monto" disabled>
+        </div>
+        <div class="form-text">Se marcará la cuota como <b>PAGADO</b>, se creará el registro en <b>pago</b> y se enviará un recibo por correo.</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button class="btn btn-domus" type="submit">Confirmar pago</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ====== Mapa de unidades por usuario (precargado desde PHP) ======
+const USER_UNITS = <?= json_encode($unitsByUser, JSON_UNESCAPED_UNICODE) ?>;
+
+// Poblado dinámico de unidades al elegir usuario
+const selUser  = document.getElementById('aq_user');
+const selUnit  = document.getElementById('aq_unidad');
+selUser?.addEventListener('change', ()=>{
+  const uid = parseInt(selUser.value || '0', 10);
+  selUnit.innerHTML = '';
+  if (!uid || !USER_UNITS[uid] || USER_UNITS[uid].length === 0) {
+    selUnit.innerHTML = '<option value="">Este usuario no tiene unidad asignada</option>';
+    return;
+  }
+  selUnit.innerHTML = '<option value="">Selecciona...</option>';
+  USER_UNITS[uid].forEach(u=>{
+    const opt = document.createElement('option');
+    opt.value = u.id_unidad;
+    opt.textContent = u.label;
+    selUnit.appendChild(opt);
+  });
+});
+
+// ====== Modal: pagar (rellena datos) ======
+document.querySelectorAll('.btn-pay').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.getElementById('pay_id_cuota').value = btn.getAttribute('data-id');
+    document.getElementById('pay_monto').value    = btn.getAttribute('data-monto');
+    document.getElementById('pay_user').value     = btn.getAttribute('data-user');
+    const a = document.getElementById('alertPay');
+    a.classList.add('d-none'); a.textContent='';
+  });
+});
+
+// ====== Submit: pagar ======
+document.getElementById('formPay').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const a = document.getElementById('alertPay');
+  const data = new FormData(e.target);
+  const res  = await fetch('morosidad.php', { method:'POST', body:data });
+  let js = {};
+  try{ js = await res.json(); }catch{ js = {success:false, message:'Respuesta inválida'} }
+  if (js.success) {
+    a.className = 'alert alert-success'; a.textContent = js.message || 'Pago registrado.';
+    a.classList.remove('d-none');
+    setTimeout(()=> location.reload(), 900);
+  } else {
+    a.className = 'alert alert-danger'; a.textContent = js.message || 'Error.';
+    a.classList.remove('d-none');
+  }
+});
+
+// ====== Submit: agregar cuota ======
+document.getElementById('formAddQuota').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const a = document.getElementById('alertAdd');
+  const data = new FormData(e.target);
+  const res  = await fetch('morosidad.php', { method:'POST', body:data });
+  let js = {};
+  try{ js = await res.json(); }catch{ js = {success:false, message:'Respuesta inválida'} }
+  if (js.success) {
+    a.className = 'alert alert-success'; a.textContent = js.message || 'Cuota creada.';
+    a.classList.remove('d-none');
+    // Limpia y resetea para permitir nuevas invitaciones/cuotas seguidas
+    e.target.reset();
+    selUnit.innerHTML = '<option value="">Selecciona un usuario...</option>';
+    setTimeout(()=> location.reload(), 900);
+  } else {
+    a.className = 'alert alert-danger'; a.textContent = js.message || 'Error.';
+    a.classList.remove('d-none');
+  }
+});
+</script>
 </body>
 </html>

@@ -9,6 +9,9 @@ if (empty($_SESSION['iduser']) || ($_SESSION['rol'] ?? '') !== 'admin') {
   header('Location: ../login/login.php');
   exit;
 }
+// Datos de sesión para el chip de usuario en navbar
+$nombre = $_SESSION['nombre'] ?? 'Administrador';
+$rol    = $_SESSION['rol'] ?? 'admin';
 
 // --------- Métricas rápidas ----------
 /** Total usuarios, verificados, pendientes */
@@ -132,6 +135,29 @@ foreach ($period as $dt) {
     .offcanvas-header{ border-bottom:1px solid #eee; }
     .list-menu .btn { text-align:left; }
     .table thead th { background: var(--accent); color:#fff; border:none; }
+    .user-chip{
+      background:#e9f7f6; 
+      color:#0F3557; 
+      border-radius:20px; 
+      padding:.35rem .6rem; 
+      font-weight:600; 
+      display:inline-flex; 
+      gap:.4rem; 
+      align-items:center; 
+    }
+  .user-chip i{ color:#1BAAA6; }
+  .user-chip-sm{
+    background:#e9f7f6;
+    color:#0F3557;
+    border-radius:18px;
+    padding:.25rem .45rem;
+    font-weight:600;
+    display:inline-flex;
+    gap:.35rem;
+    align-items:center;
+    font-size:.9rem;
+  }
+  .user-chip-sm i{ color:#1BAAA6; }
   </style>
 </head>
 <body>
@@ -144,9 +170,24 @@ foreach ($period as $dt) {
     </button>
     <span class="brand-badge">iDomus · Dashboard</span>
     <div class="d-flex align-items-center gap-2">
-      <!-- <a href="../home/home.php" class="btn btn-sm btn-outline-light"><i class="bi bi-house-door"></i> Home</a> -->
-      <a href="../login/login.php?logout=1" class="btn btn-sm btn-outline-light"><i class="bi bi-box-arrow-right"></i> Salir</a>
-    </div>
+    <!-- Desktop (≥576px): nombre + rol -->
+    <span class="user-chip d-none d-sm-inline-flex">
+    <i class="bi bi-person-circle"></i>
+    <?= htmlspecialchars($nombre) ?> · <?= htmlspecialchars(ucfirst($rol)) ?>
+    </span>
+
+    <!-- Móvil (<576px): versión compacta -->
+    <span class="user-chip-sm d-inline-flex d-sm-none">
+    <i class="bi bi-person-circle"></i>
+    <?= htmlspecialchars(ucfirst($rol)) ?>
+    </span>
+
+    <a href="../login/login.php?logout=1" class="btn btn-sm btn-outline-light">
+    <i class="bi bi-box-arrow-right"></i> Salir
+    </a>
+  </div>
+  
+
   </div>
 </nav>
 

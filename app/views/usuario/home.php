@@ -43,6 +43,28 @@ $rol    = $_SESSION['rol'] ?? 'usuario';
     .card-domus{border:0;border-radius:14px;box-shadow:0 6px 18px rgba(15,53,87,.08);}
     .btn-domus{background:var(--dark);color:#fff;border:none;}
     .btn-domus:hover{background:var(--acc);}
+    
+    /* Resalta el link activo en el navbar */
+    .navbar .nav-link {
+      border-radius: 999px;                  /* Siempre redondeado */
+      padding: .35rem .9rem;                 /* Mantiene la forma ovalada */
+      transition: all .25s ease-in-out;      /* Transición suave para color/fondo */
+    }
+
+    /* Enlace activo */
+    .navbar .nav-link.active {
+      color: #fff !important;
+      background: var(--acc);
+      font-weight: 800;
+      box-shadow: 0 0 12px rgba(27,170,166,.8);
+    }
+
+    /* Hover: conserva forma y añade brillo */
+    .navbar .nav-link:hover {
+      color: #fff !important;
+      background: rgba(27,170,166,.35);
+      box-shadow: 0 0 10px rgba(27,170,166,.5);
+    }
   </style>
 </head>
 <body>
@@ -64,6 +86,7 @@ $rol    = $_SESSION['rol'] ?? 'usuario';
         <li class="nav-item"><a class="nav-link" href="#">Reservas</a></li>
         <li class="nav-item"><a class="nav-link" href="#">Alquiler</a></li>
         <li class="nav-item"><a class="nav-link" href="#">Acerca de</a></li>
+        <li class="nav-item"><a class="nav-link" href="http://127.0.0.1:8000/lista">votacion</a></li>
       </ul>
 
       <!-- Dropdown de usuario con icono -->

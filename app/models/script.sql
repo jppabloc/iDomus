@@ -399,3 +399,363 @@ INSERT INTO cuota_mantenimiento (id_unidad, monto, fecha_generacion, fecha_venci
 ((SELECT id_unidad FROM unidad WHERE nro_unidad='T1-21'), 335.00, DATE '2025-10-01', DATE '2025-10-10', 'PENDIENTE'),
 ((SELECT id_unidad FROM unidad WHERE nro_unidad='A-201'), 350.00, DATE '2025-09-01', DATE '2025-09-10', 'PAGADO');
 
+-- Tabla de invitaciones / pre-registro
+CREATE TABLE IF NOT EXISTS pre_registro (
+  id           SERIAL PRIMARY KEY,
+  email        VARCHAR(150) UNIQUE NOT NULL,
+  token        VARCHAR(64) UNIQUE NOT NULL,
+  expira_en    TIMESTAMP NOT NULL,
+  usado        BOOLEAN DEFAULT FALSE,
+  creado_por   INT,
+  creado_en    TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pre_registro_token ON pre_registro(token);
+
+-- =========================
+-- (OPCIONAL) LIMPIEZA TOTAL
+-- =========================
+-- OJO: esto borra datos si ya tenías algo.
+-- TRUNCATE TABLE
+--   pago_historial,
+--   pago,
+--   cuota_mantenimiento,
+--   residente_unidad,
+--   usuario_rol,
+--   usuario,
+--   rol,
+--   unidad,
+--   bloque,
+--   edificio
+-- RESTART IDENTITY CASCADE;
+
+BEGIN;
+
+-- =========================
+-- ROLES (base)
+-- =========================
+INSERT INTO rol (nombre_rol) VALUES ('usuario')
+ON CONFLICT (nombre_rol) DO NOTHING;
+
+INSERT INTO rol (nombre_rol) VALUES ('admin')
+ON CONFLICT (nombre_rol) DO NOTHING;
+
+INSERT INTO rol (nombre_rol) VALUES ('personal')
+ON CONFLICT (nombre_rol) DO NOTHING;
+
+-- =========================
+-- EDIFICIOS
+-- =========================
+INSERT INTO edificio (nombre, direccion, nro_bloques)
+VALUES ('Condominio Idomus A', 'Av. Central 123', 2)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO edificio (nombre, direccion, nro_bloques)
+VALUES ('Condominio Idomus B', 'Calle Norte 456', 1)
+ON CONFLICT DO NOTHING;
+
+-- =========================
+-- BLOQUES (buscando id_edificio por nombre)
+-- =========================
+INSERT INTO bloque (id_edificio, nombre, descripcion)
+SELECT e.id_edificio, 'Bloque A1', 'Torre principal'
+FROM edificio e
+WHERE e.nombre = 'Condominio Idomus A'
+  AND NOT EXISTS (
+    SELECT 1 FROM bloque b WHERE b.nombre='Bloque A1'
+      AND b.id_edificio = e.id_edificio
+  );
+
+INSERT INTO bloque (id_edificio, nombre, descripcion)
+SELECT e.id_edificio, 'Bloque A2', 'Torre lateral'
+FROM edificio e
+WHERE e.nombre = 'Condominio Idomus A'
+  AND NOT EXISTS (
+    SELECT 1 FROM bloque b WHERE b.nombre='Bloque A2'
+      AND b.id_edificio = e.id_edificio
+  );
+
+INSERT INTO bloque (id_edificio, nombre, descripcion)
+SELECT e.id_edificio, 'Bloque B1', 'Torre única'
+FROM edificio e
+WHERE e.nombre = 'Condominio Idomus B'
+  AND NOT EXISTS (
+    SELECT 1 FROM bloque b WHERE b.nombre='Bloque B1'
+      AND b.id_edificio = e.id_edificio
+  );
+
+-- =========================
+-- UNIDADES (buscando id_bloque por nombre)
+-- =========================
+-- A1
+INSERT INTO unidad (id_bloque, nro_unidad, piso, metros_cuadrados, estado)
+SELECT b.id_bloque, 'A1-101', 1, 78.5, 'Ocupado'
+FROM bloque b
+JOIN edificio e ON e.id_edificio=b.id_edificio
+WHERE e.nombre='Condominio Idomus A' AND b.nombre='Bloque A1'
+  AND NOT EXISTS (SELECT 1 FROM unidad u WHERE u.nro_unidad='A1-101');
+
+INSERT INTO unidad (id_bloque, nro_unidad, piso, metros_cuadrados, estado)
+SELECT b.id_bloque, 'A1-102', 1, 65.0, 'Ocupado'
+FROM bloque b
+JOIN edificio e ON e.id_edificio=b.id_edificio
+WHERE e.nombre='Condominio Idomus A' AND b.nombre='Bloque A1'
+  AND NOT EXISTS (SELECT 1 FROM unidad u WHERE u.nro_unidad='A1-102');
+
+INSERT INTO unidad (id_bloque, nro_unidad, piso, metros_cuadrados, estado)
+SELECT b.id_bloque, 'A1-201', 2, 78.5, 'Ocupado'
+FROM bloque b
+JOIN edificio e ON e.id_edificio=b.id_edificio
+WHERE e.nombre='Condominio Idomus A' AND b.nombre='Bloque A1'
+  AND NOT EXISTS (SELECT 1 FROM unidad u WHERE u.nro_unidad='A1-201');
+
+INSERT INTO unidad (id_bloque, nro_unidad, piso, metros_cuadrados, estado)
+SELECT b.id_bloque, 'A1-202', 2, 65.0, 'Vacío'
+FROM bloque b
+JOIN edificio e ON e.id_edificio=b.id_edificio
+WHERE e.nombre='Condominio Idomus A' AND b.nombre='Bloque A1'
+  AND NOT EXISTS (SELECT 1 FROM unidad u WHERE u.nro_unidad='A1-202');
+
+-- A2
+INSERT INTO unidad (id_bloque, nro_unidad, piso, metros_cuadrados, estado)
+SELECT b.id_bloque, 'A2-301', 3, 80.0, 'Ocupado'
+FROM bloque b
+JOIN edificio e ON e.id_edificio=b.id_edificio
+WHERE e.nombre='Condominio Idomus A' AND b.nombre='Bloque A2'
+  AND NOT EXISTS (SELECT 1 FROM unidad u WHERE u.nro_unidad='A2-301');
+
+INSERT INTO unidad (id_bloque, nro_unidad, piso, metros_cuadrados, estado)
+SELECT b.id_bloque, 'A2-302', 3, 70.0, 'Ocupado'
+FROM bloque b
+JOIN edificio e ON e.id_edificio=b.id_edificio
+WHERE e.nombre='Condominio Idomus A' AND b.nombre='Bloque A2'
+  AND NOT EXISTS (SELECT 1 FROM unidad u WHERE u.nro_unidad='A2-302');
+
+INSERT INTO unidad (id_bloque, nro_unidad, piso, metros_cuadrados, estado)
+SELECT b.id_bloque, 'A2-401', 4, 90.0, 'Ocupado'
+FROM bloque b
+JOIN edificio e ON e.id_edificio=b.id_edificio
+WHERE e.nombre='Condominio Idomus A' AND b.nombre='Bloque A2'
+  AND NOT EXISTS (SELECT 1 FROM unidad u WHERE u.nro_unidad='A2-401');
+
+INSERT INTO unidad (id_bloque, nro_unidad, piso, metros_cuadrados, estado)
+SELECT b.id_bloque, 'A2-402', 4, 90.0, 'Ocupado'
+FROM bloque b
+JOIN edificio e ON e.id_edificio=b.id_edificio
+WHERE e.nombre='Condominio Idomus A' AND b.nombre='Bloque A2'
+  AND NOT EXISTS (SELECT 1 FROM unidad u WHERE u.nro_unidad='A2-402');
+
+-- B1
+INSERT INTO unidad (id_bloque, nro_unidad, piso, metros_cuadrados, estado)
+SELECT b.id_bloque, 'B1-101', 1, 75.0, 'Ocupado'
+FROM bloque b
+JOIN edificio e ON e.id_edificio=b.id_edificio
+WHERE e.nombre='Condominio Idomus B' AND b.nombre='Bloque B1'
+  AND NOT EXISTS (SELECT 1 FROM unidad u WHERE u.nro_unidad='B1-101');
+
+INSERT INTO unidad (id_bloque, nro_unidad, piso, metros_cuadrados, estado)
+SELECT b.id_bloque, 'B1-201', 2, 75.0, 'Ocupado'
+FROM bloque b
+JOIN edificio e ON e.id_edificio=b.id_edificio
+WHERE e.nombre='Condominio Idomus B' AND b.nombre='Bloque B1'
+  AND NOT EXISTS (SELECT 1 FROM unidad u WHERE u.nro_unidad='B1-201');
+
+-- =========================
+-- USUARIOS (2 admins + 10 residentes)
+-- =========================
+-- Admins
+INSERT INTO usuario (nombre, apellido, correo, telefono, contrasena, verificado)
+VALUES ('Carlos','Admin','cadmin@idomus.com','70000001','hash_admin',true)
+ON CONFLICT (correo) DO NOTHING;
+
+INSERT INTO usuario (nombre, apellido, correo, telefono, contrasena, verificado)
+VALUES ('Lucía','Supervisor','lsuper@idomus.com','70000002','hash_admin',true)
+ON CONFLICT (correo) DO NOTHING;
+
+-- Residentes
+INSERT INTO usuario (nombre, apellido, correo, telefono, contrasena, verificado) VALUES
+ ('Juan','Pérez','juan.perez@vecinos.com','70000011','hash_res',true),
+ ('Ana','López','ana.lopez@vecinos.com','70000012','hash_res',true),
+ ('María','Gutiérrez','maria.gtz@vecinos.com','70000013','hash_res',true),
+ ('Pedro','Quispe','pedro.qp@vecinos.com','70000014','hash_res',true),
+ ('Sofía','Ramos','sofia.rm@vecinos.com','70000015','hash_res',true),
+ ('Diego','Fernández','diego.fdz@vecinos.com','70000016','hash_res',true),
+ ('Elena','Mendoza','elena.mdz@vecinos.com','70000017','hash_res',true),
+ ('Luis','Vargas','luis.vg@vecinos.com','70000018','hash_res',true),
+ ('Valeria','Arias','valeria.ar@vecinos.com','70000019','hash_res',true),
+ ('Jorge','Salazar','jorge.sz@vecinos.com','70000020','hash_res',true)
+ON CONFLICT (correo) DO NOTHING;
+
+-- Roles de usuarios
+INSERT INTO usuario_rol (iduser, idrol)
+SELECT u.iduser, r.idrol
+FROM usuario u
+JOIN rol r ON r.nombre_rol='admin'
+WHERE u.correo IN ('cadmin@idomus.com','lsuper@idomus.com')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO usuario_rol (iduser, idrol)
+SELECT u.iduser, r.idrol
+FROM usuario u
+JOIN rol r ON r.nombre_rol='usuario'
+WHERE u.correo IN ('juan.perez@vecinos.com','ana.lopez@vecinos.com','maria.gtz@vecinos.com','pedro.qp@vecinos.com',
+                   'sofia.rm@vecinos.com','diego.fdz@vecinos.com','elena.mdz@vecinos.com','luis.vg@vecinos.com',
+                   'valeria.ar@vecinos.com','jorge.sz@vecinos.com')
+ON CONFLICT DO NOTHING;
+
+-- =========================
+-- RESIDENTE x UNIDAD (1:1)
+-- =========================
+INSERT INTO residente_unidad (id_usuario, id_unidad, tipo_residencia)
+SELECT u.iduser, un.id_unidad, 'Propietario'
+FROM usuario u
+JOIN unidad un ON un.nro_unidad='A1-101'
+WHERE u.correo='juan.perez@vecinos.com'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO residente_unidad (id_usuario, id_unidad, tipo_residencia)
+SELECT u.iduser, un.id_unidad, 'Propietario'
+FROM usuario u
+JOIN unidad un ON un.nro_unidad='A1-102'
+WHERE u.correo='ana.lopez@vecinos.com'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO residente_unidad (id_usuario, id_unidad, tipo_residencia)
+SELECT u.iduser, un.id_unidad, 'Inquilino'
+FROM usuario u
+JOIN unidad un ON un.nro_unidad='A1-201'
+WHERE u.correo='maria.gtz@vecinos.com'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO residente_unidad (id_usuario, id_unidad, tipo_residencia)
+SELECT u.iduser, un.id_unidad, 'Inquilino'
+FROM usuario u
+JOIN unidad un ON un.nro_unidad='A1-202'
+WHERE u.correo='pedro.qp@vecinos.com'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO residente_unidad (id_usuario, id_unidad, tipo_residencia)
+SELECT u.iduser, un.id_unidad, 'Propietario'
+FROM usuario u
+JOIN unidad un ON un.nro_unidad='A2-301'
+WHERE u.correo='sofia.rm@vecinos.com'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO residente_unidad (id_usuario, id_unidad, tipo_residencia)
+SELECT u.iduser, un.id_unidad, 'Propietario'
+FROM usuario u
+JOIN unidad un ON un.nro_unidad='A2-302'
+WHERE u.correo='diego.fdz@vecinos.com'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO residente_unidad (id_usuario, id_unidad, tipo_residencia)
+SELECT u.iduser, un.id_unidad, 'Propietario'
+FROM usuario u
+JOIN unidad un ON un.nro_unidad='A2-401'
+WHERE u.correo='elena.mdz@vecinos.com'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO residente_unidad (id_usuario, id_unidad, tipo_residencia)
+SELECT u.iduser, un.id_unidad, 'Propietario'
+FROM usuario u
+JOIN unidad un ON un.nro_unidad='A2-402'
+WHERE u.correo='luis.vg@vecinos.com'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO residente_unidad (id_usuario, id_unidad, tipo_residencia)
+SELECT u.iduser, un.id_unidad, 'Propietario'
+FROM usuario u
+JOIN unidad un ON un.nro_unidad='B1-101'
+WHERE u.correo='valeria.ar@vecinos.com'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO residente_unidad (id_usuario, id_unidad, tipo_residencia)
+SELECT u.iduser, un.id_unidad, 'Propietario'
+FROM usuario u
+JOIN unidad un ON un.nro_unidad='B1-201'
+WHERE u.correo='jorge.sz@vecinos.com'
+ON CONFLICT DO NOTHING;
+
+-- =========================
+-- CUOTAS DE MANTENIMIENTO (Octubre 2025)
+-- =========================
+INSERT INTO cuota_mantenimiento (id_unidad, monto, fecha_generacion, fecha_vencimiento, estado)
+SELECT un.id_unidad,
+       CASE 
+         WHEN un.nro_unidad IN ('A2-401','A2-402') THEN 180.00
+         WHEN un.nro_unidad IN ('A1-201','B1-201') THEN 160.00
+         ELSE 150.00
+       END AS monto,
+       DATE '2025-10-01' AS fecha_generacion,
+       DATE '2025-10-15' AS fecha_vencimiento,
+       'Pendiente' AS estado
+FROM unidad un
+WHERE un.nro_unidad IN ('A1-101','A1-102','A1-201','A1-202',
+                        'A2-301','A2-302','A2-401','A2-402',
+                        'B1-101','B1-201')
+  AND NOT EXISTS (
+    SELECT 1 FROM cuota_mantenimiento cm
+    WHERE cm.id_unidad = un.id_unidad
+      AND cm.fecha_generacion = DATE '2025-10-01'
+  );
+
+-- =========================
+-- PAGOS (algunos ya pagaron)
+-- =========================
+INSERT INTO pago (id_usuario, monto, fecha_pago, concepto, estado)
+SELECT u.iduser, 150.00, DATE '2025-10-05', 'Cuota Octubre', 'Pagado'
+FROM usuario u WHERE u.correo='ana.lopez@vecinos.com'
+  AND NOT EXISTS (SELECT 1 FROM pago p WHERE p.id_usuario=u.iduser AND p.fecha_pago=DATE '2025-10-05');
+
+INSERT INTO pago (id_usuario, monto, fecha_pago, concepto, estado)
+SELECT u.iduser, 150.00, DATE '2025-10-07', 'Cuota Octubre', 'Pagado'
+FROM usuario u WHERE u.correo='sofia.rm@vecinos.com'
+  AND NOT EXISTS (SELECT 1 FROM pago p WHERE p.id_usuario=u.iduser AND p.fecha_pago=DATE '2025-10-07');
+
+INSERT INTO pago (id_usuario, monto, fecha_pago, concepto, estado)
+SELECT u.iduser, 180.00, DATE '2025-10-08', 'Cuota Octubre', 'Pagado'
+FROM usuario u WHERE u.correo='elena.mdz@vecinos.com'
+  AND NOT EXISTS (SELECT 1 FROM pago p WHERE p.id_usuario=u.iduser AND p.fecha_pago=DATE '2025-10-08');
+
+INSERT INTO pago (id_usuario, monto, fecha_pago, concepto, estado)
+SELECT u.iduser, 150.00, DATE '2025-10-09', 'Cuota Octubre', 'Pagado'
+FROM usuario u WHERE u.correo='valeria.ar@vecinos.com'
+  AND NOT EXISTS (SELECT 1 FROM pago p WHERE p.id_usuario=u.iduser AND p.fecha_pago=DATE '2025-10-09');
+
+INSERT INTO pago (id_usuario, monto, fecha_pago, concepto, estado)
+SELECT u.iduser, 160.00, DATE '2025-10-10', 'Cuota Octubre', 'Pagado'
+FROM usuario u WHERE u.correo='jorge.sz@vecinos.com'
+  AND NOT EXISTS (SELECT 1 FROM pago p WHERE p.id_usuario=u.iduser AND p.fecha_pago=DATE '2025-10-10');
+
+-- Marcar como Pagado las cuotas de esas unidades (JOIN seguro)
+WITH pagar AS (
+  SELECT un.id_unidad
+  FROM unidad un
+  WHERE un.nro_unidad IN ('A1-102','A2-301','A2-401','B1-101','B1-201')
+)
+UPDATE cuota_mantenimiento cm
+SET estado = 'Pagado'
+FROM pagar p
+WHERE cm.id_unidad = p.id_unidad
+  AND cm.fecha_generacion = DATE '2025-10-01';
+
+-- =========================
+-- VISTA para morosidad.php
+-- =========================
+CREATE OR REPLACE VIEW vw_morosidad AS
+SELECT 
+  u.iduser,
+  (u.nombre || ' ' || u.apellido) AS usuario,
+  un.nro_unidad AS unidad,
+  cm.monto,
+  'Mantenimiento'::text AS concepto,
+  cm.fecha_vencimiento,
+  cm.estado  -- 'Pendiente' / 'Pagado'
+FROM cuota_mantenimiento cm
+JOIN unidad un         ON un.id_unidad = cm.id_unidad
+JOIN residente_unidad ru ON ru.id_unidad = un.id_unidad
+JOIN usuario u         ON u.iduser = ru.id_usuario
+ORDER BY cm.estado DESC, u.apellido, u.nombre;
+
+COMMIT;
+
