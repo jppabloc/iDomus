@@ -5,7 +5,7 @@ Permite administrar usuarios, pagos, mantenimientos, consumos y servicios del co
 
 ---
 
-## 📘 Información académica
+## 📘 Información 
 
 - **Materia:** INF-281 — *Taller de Sistemas de Información*  
 - **Docente:** Lic. Brígida Carvajal  
@@ -44,20 +44,8 @@ Permite administrar usuarios, pagos, mantenimientos, consumos y servicios del co
 
 ---
 
-## 🔑 Funcionalidades principales
-
-✅ Registro y autenticación segura de usuarios  
-✅ Roles de administrador e inquilino  
-✅ Gestión de pagos, mantenimientos y consumos  
-✅ Dashboard con métricas principales  
-✅ Verificación de cuenta de usuario  
-✅ Conexión API para aplicación Android  
-✅ Interfaz moderna y limpia  
-
----
-
 ## ⚡ Instalación local
 
 1. Clona el repositorio:
    ```bash
-   git clone https://github.com/tuusuario/iDomus.git
+   git clone https://github.com/jppabloc/iDomus.git
