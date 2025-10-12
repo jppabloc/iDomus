@@ -101,6 +101,33 @@ foreach ($period as $dt) {
   $labelsMor[]  = $k;
   $dataMorCnt[] = $mapM[$k] ?? 0;
 }
+/** Reservas: activas ahora (APROBADAS y en curso) */
+$stmt = $conexion->query("
+  SELECT COUNT(*) 
+  FROM reserva 
+  WHERE estado = 'APROBADA'
+    AND NOW() BETWEEN fecha_inicio AND fecha_fin
+");
+$reservas_activas = (int)$stmt->fetchColumn();
+
+/** Reservas: aprobadas este mes (por fecha_inicio) */
+$stmt = $conexion->query("
+  SELECT COUNT(*) 
+  FROM reserva 
+  WHERE estado = 'APROBADA'
+    AND DATE_TRUNC('month', fecha_inicio) = DATE_TRUNC('month', CURRENT_DATE)
+");
+$reservas_mes = (int)$stmt->fetchColumn();
+
+/** Reservas: próximas 7 días (opcional, útil para planificar) */
+$stmt = $conexion->query("
+  SELECT COUNT(*) 
+  FROM reserva 
+  WHERE estado = 'APROBADA'
+    AND fecha_inicio >= NOW()
+    AND fecha_inicio < NOW() + INTERVAL '7 days'
+");
+$reservas_proximas = (int)$stmt->fetchColumn();
 
 // --------- Salida HTML ---------
 ?>
@@ -204,6 +231,9 @@ foreach ($period as $dt) {
       <a href="consumos.php"  class="btn btn-outline-primary"><i class="bi bi-lightning-charge me-1"></i> Consumos</a>
       <a href="morosidad.php" class="btn btn-outline-primary"><i class="bi bi-exclamation-octagon me-1"></i> Morosidad</a>
       <a href="usuarios.php" class="btn btn-outline-primary"><i class="bi bi-people me-1"></i> Usuarios</a>
+      <a href="../operacion/actas.php" class="btn btn-outline-primary">
+        <i class="bi bi-journal-check me-1"></i> Actas (entrega/devolución)
+      </a>
     </div>
   </div>
 </div>
@@ -276,6 +306,48 @@ foreach ($period as $dt) {
         </div>
       </div>
     </div>
+
+    <!-- KPI: Reservas -->
+<div class="col-12 col-md-6 col-lg-3">
+  <div class="card card-kpi p-3">
+    <div class="d-flex justify-content-between align-items-center">
+      <div>
+        <div class="kpi-sub">Reservas (ahora)</div>
+        <div class="kpi-value"><?= number_format($reservas_activas) ?></div>
+        <div class="text-muted small">
+          Mes: <?= number_format($reservas_mes) ?> · Próx. 7 días: <?= number_format($reservas_proximas) ?>
+        </div>
+      </div>
+      <div class="icon"><i class="bi bi-calendar-check"></i></div>
+    </div>
+    <div class="mt-3">
+      <a href="reservas.php" class="btn btn-sm btn-domus">Ver reservas</a>
+    </div>
+  </div>
+</div>
+
+    <!-- Reservas activas -->
+<div class="col-12 col-md-6 col-lg-3">
+  <div class="card card-kpi p-3">
+    <div class="d-flex justify-content-between align-items-center">
+      <div>
+        <div class="kpi-sub">Reservas activas</div>
+        <?php
+          $stmt = $conexion->query("
+            SELECT COUNT(*) FROM reserva WHERE estado IN ('ACTIVA', 'CONFIRMADA')
+          ");
+          $reservas_activas = (int)$stmt->fetchColumn();
+        ?>
+        <div class="kpi-value"><?= $reservas_activas ?></div>
+        <div class="text-muted small">Salones / Áreas</div>
+      </div>
+      <div class="icon"><i class="bi bi-calendar-check"></i></div>
+    </div>
+    <div class="mt-3">
+      <a href="reservas.php" class="btn btn-sm btn-domus">Ver reservas</a>
+    </div>
+  </div>
+</div>
   </div>
 
   <!-- Gráficas -->
@@ -313,6 +385,9 @@ foreach ($period as $dt) {
           <a href="consumos.php"  class="btn btn-outline-primary"><i class="bi bi-lightning me-1"></i> Consumos</a>
           <a href="morosidad.php" class="btn btn-outline-primary"><i class="bi bi-clipboard-x me-1"></i> Morosidad</a>
           <a href="usuarios.php" class="btn btn-outline-primary"><i class="bi bi-people me-1"></i> Usuarios</a>
+          <a href="../operacion/actas.php" class="btn btn-outline-primary">
+            <i class="bi bi-clipboard-check me-1"></i> Actas
+          </a>
         </div>
       </div>
     </div>

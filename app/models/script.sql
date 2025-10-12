@@ -759,3 +759,108 @@ ORDER BY cm.estado DESC, u.apellido, u.nombre;
 
 COMMIT;
 
+-- Asegura valores consistentes de estado en RESERVA
+ALTER TABLE reserva
+  ADD CONSTRAINT reserva_estado_chk
+  CHECK (UPPER(estado) IN ('PENDIENTE','APROBADA','CANCELADA','RECHAZADA'));
+
+-- Índices que ayudan a validar traslapes por área y fechas
+CREATE INDEX IF NOT EXISTS idx_reserva_area ON reserva (id_area);
+CREATE INDEX IF NOT EXISTS idx_reserva_rango ON reserva (fecha_inicio, fecha_fin);
+
+-- Áreas de prueba (ajusta id_edificio existente)
+INSERT INTO area_comun (id_edificio, nombre_area, descripcion, capacidad, estado)
+VALUES 
+  (1, 'Jardín', 'Área verde para eventos pequeños', 30, 'DISPONIBLE'),
+  (1, 'Salón Comunal', 'Salón para reuniones', 50, 'DISPONIBLE'),
+  (1, 'Parrillero', 'Parrilla y mesas', 20, 'DISPONIBLE')
+ON CONFLICT DO NOTHING;
+
+ALTER TABLE reserva ADD COLUMN nota TEXT;
+
+-- Campos para gestión de aprobaciones y cancelaciones
+ALTER TABLE reserva 
+  ADD COLUMN IF NOT EXISTS aprobado_por INT REFERENCES usuario(iduser),
+  ADD COLUMN IF NOT EXISTS cancelado_por INT REFERENCES usuario(iduser),
+  ADD COLUMN IF NOT EXISTS fecha_aprobacion TIMESTAMP,
+  ADD COLUMN IF NOT EXISTS fecha_cancelacion TIMESTAMP,
+  ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT;
+
+-- NOTIFICACIONES: tipo, url, icono
+ALTER TABLE notificacion
+  ADD COLUMN IF NOT EXISTS tipo VARCHAR(30) DEFAULT 'INFO',
+  ADD COLUMN IF NOT EXISTS url TEXT,
+  ADD COLUMN IF NOT EXISTS icono VARCHAR(80) DEFAULT 'bi-bell';
+
+
+-- VOTACIÓN para anuncios
+
+CREATE TABLE IF NOT EXISTS anuncio (
+  id_anuncio SERIAL PRIMARY KEY,
+  id_admin   INT REFERENCES usuario(iduser) ON DELETE SET NULL,
+  titulo     VARCHAR(200) NOT NULL,
+  contenido  TEXT NOT NULL,
+  visible_desde TIMESTAMP DEFAULT NOW(),
+  visible_hasta TIMESTAMP,
+  creado_en  TIMESTAMP DEFAULT NOW(),
+  estado     VARCHAR(20) NOT NULL DEFAULT 'PUBLICADO' -- PUBLICADO / ARCHIVADO
+);
+
+-- Quién ya lo vio (opcional)
+CREATE TABLE IF NOT EXISTS anuncio_leido (
+  id_anuncio INT REFERENCES anuncio(id_anuncio) ON DELETE CASCADE,
+  id_usuario INT REFERENCES usuario(iduser) ON DELETE CASCADE,
+  leido_en   TIMESTAMP DEFAULT NOW(),
+  PRIMARY KEY(id_anuncio, id_usuario)
+);
+
+-- indices recomendados (mas rapidez)
+CREATE INDEX IF NOT EXISTS idx_notif_usuario_leido
+ON notificacion (id_usuario, leido);
+
+CREATE INDEX IF NOT EXISTS idx_notif_usuario_fecha
+ON notificacion (id_usuario, fecha_envio DESC);
+
+ALTER TABLE usuario
+ADD COLUMN rol VARCHAR(20) DEFAULT 'usuario';
+
+-- Actualiza a admin a quien corresponda
+UPDATE usuario SET rol='admin' WHERE iduser=1;
+
+-- Asegura que la secuencia sea propiedad de la columna id_reserva
+ALTER SEQUENCE reserva_id_reserva_seq OWNED BY reserva.id_reserva;
+
+-- Asegura el DEFAULT correcto
+ALTER TABLE reserva 
+ALTER COLUMN id_reserva SET DEFAULT nextval('reserva_id_reserva_seq'::regclass);
+
+
+
+
+-- ==========  ACTA DE ENTREGA / DEVOLUCIÓN ==========
+CREATE TABLE IF NOT EXISTS acta_reserva (
+  id_acta         SERIAL PRIMARY KEY,
+  id_reserva      INT NOT NULL UNIQUE
+    REFERENCES reserva(id_reserva) ON DELETE CASCADE,
+  estado          VARCHAR(20) NOT NULL DEFAULT 'PENDIENTE', -- PENDIENTE|ENTREGADO|DEVUELTO|DEVUELTO_DANOS|CERRADO
+  fecha_entrega   TIMESTAMP,
+  entregado_por   INT REFERENCES usuario(iduser),
+  observ_entrega  TEXT,
+  fecha_devolucion TIMESTAMP,
+  recibido_por    INT REFERENCES usuario(iduser),
+  observ_devolucion TEXT,
+  cargo_total     NUMERIC(12,2) DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_acta_reserva_estado ON acta_reserva(estado);
+
+-- Daños por acta
+CREATE TABLE IF NOT EXISTS acta_danio (
+  id_danio    SERIAL PRIMARY KEY,
+  id_acta     INT NOT NULL REFERENCES acta_reserva(id_acta) ON DELETE CASCADE,
+  descripcion TEXT NOT NULL,
+  monto       NUMERIC(12,2) NOT NULL DEFAULT 0,
+  foto_url    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_acta_danio_acta ON acta_danio(id_acta);

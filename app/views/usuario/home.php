@@ -2,6 +2,7 @@
 // app/views/usuario/home.php
 declare(strict_types=1);
 session_start();
+require_once '../../models/conexion.php';
 
 // Solo usuarios logueados
 if (!isset($_SESSION['iduser'])) {
