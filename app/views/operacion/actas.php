@@ -11,6 +11,10 @@ if (empty($_SESSION['iduser']) || ($_SESSION['rol'] ?? '') !== 'admin') {
 $idUser = (int)$_SESSION['iduser'];
 $nombre = $_SESSION['nombre'] ?? 'Admin';
 
+// Datos de sesión para el chip de usuario en navbar
+$nombre = $_SESSION['nombre'] ?? 'Administrador';
+$rol    = $_SESSION['rol'] ?? 'admin';
+
 /* ==== ACCIONES POST ==== */
 if ($_SERVER['REQUEST_METHOD']==='POST') {
   $accion = $_POST['action'] ?? '';
@@ -139,12 +143,44 @@ body{background:#f7fafd;font-family:'Segoe UI',Arial,sans-serif;color:var(--text
 .card-domus{border:0;border-radius:14px;box-shadow:0 6px 18px rgba(15,53,87,.08);background:#fff;}
 .table thead th{ background:var(--acc); color:#fff; border:none; }
 .badge-soft{ background:#eef7f7; color:#0F3557; font-weight:700;}
+
+    .user-chip{
+      background:#e9f7f6; color:#0F3557; border-radius:20px; padding:.35rem .6rem; font-weight:600;
+      display:inline-flex; gap:.4rem; align-items:center;
+    }
+    .user-chip i{ color:#1BAAA6; }
+    .user-chip-sm{ background:#e9f7f6; color:#0F3557; border-radius:18px; padding:.25rem .45rem; font-weight:600;
+      display:inline-flex; gap:.35rem; align-items:center; font-size:.9rem; }
+    .user-chip-sm i{ color:#1BAAA6; }
+    .badge-admin { background:#023047; color:#fff; font-weight:600; }
+    .badge-usuario { background:#e7f7f6; color:#0F3557; font-weight:600; }
+    .badge-moderador { background:#ffd166; color:#000; font-weight:600; }
+    .badge-default { background:#ccc; color:#333; font-weight:600; }
 </style>
 </head>
 <body>
 <nav class="navbar navbar-dark px-3">
   <a class="navbar-brand text-white" href="../dashboard/dashboard.php"><i class="bi bi-arrow-left-circle"></i> Volver</a>
-  <span class="text-white fw-bold">Actas de Entrega / Devolución</span>
+  
+  <!-- Derecha -->
+    <div class="ms-auto d-flex align-items-center gap-3">
+      
+
+      <!-- Desktop (≥576px): nombre + rol -->
+      <span class="user-chip d-none d-sm-inline-flex">
+        <i class="bi bi-person-circle"></i>
+        <?= htmlspecialchars($nombre) ?> · <?= htmlspecialchars(ucfirst($rol)) ?>
+      </span>
+
+      <!-- Móvil (<576px): versión compacta -->
+      <span class="user-chip-sm d-inline-flex d-sm-none">
+        <i class="bi bi-person-circle"></i>
+        <?= htmlspecialchars(ucfirst($rol)) ?>
+      </span>
+      <!-- Título -->
+      <span class="text-white fw-bold">Actas de Entrega / Devolución</span>
+    </div>
+
 </nav>
 
 <div class="container-xxl my-4">

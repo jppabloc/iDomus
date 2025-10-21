@@ -87,11 +87,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax'])) {
   $action  = $_POST['action'] ?? '';
   $adminId = (int)($_SESSION['iduser'] ?? 0);
 
-  // ---- Crear cuota pendiente ----
+  // ---- Crear cuota pendiente (mantiene select + detalle opcional) ----
   if ($action === 'add_quota') {
     $iduser           = (int)($_POST['iduser'] ?? 0);
     $id_unidad        = (int)($_POST['id_unidad'] ?? 0);
-    $concepto         = strtoupper(trim($_POST['concepto'] ?? 'OTROS'));
+    $conceptoCat      = strtoupper(trim($_POST['concepto'] ?? 'OTROS')); // AGUA | ENERGIA | OTROS
+    $conceptoDet      = trim($_POST['concepto_detalle'] ?? '');          // opcional
     $monto            = (float)($_POST['monto']  ?? 0);
     $fecha_gen        = $_POST['fecha_generacion']   ?? date('Y-m-d');
     $fecha_venc       = $_POST['fecha_vencimiento']  ?? date('Y-m-d');
@@ -99,18 +100,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax'])) {
     if ($iduser <= 0 || $id_unidad <= 0 || $monto <= 0) {
       json_out(false, 'Datos inválidos (usuario, unidad y monto son obligatorios).');
     }
-    if (!in_array($concepto, ['AGUA','ENERGIA','OTROS'], true)) {
-      $concepto = 'OTROS';
+    if (!in_array($conceptoCat, ['AGUA','ENERGIA','OTROS'], true)) {
+      $conceptoCat = 'OTROS';
+    }
+
+    // Construir concepto final (prefijo categoría + detalle opcional)
+    $conceptoFinal = $conceptoCat;
+    if ($conceptoDet !== '') {
+      $conceptoFinal .= ': ' . $conceptoDet;
     }
 
     try {
       $sql = "INSERT INTO cuota_mantenimiento (id_unidad, monto, fecha_generacion, fecha_vencimiento, estado, concepto)
               VALUES (:u, :m, :fg, :fv, 'PENDIENTE', :c)";
       $ok = $conexion->prepare($sql)->execute([
-        ':u'=>$id_unidad, ':m'=>$monto, ':fg'=>$fecha_gen, ':fv'=>$fecha_venc, ':c'=>$concepto
+        ':u'=>$id_unidad, ':m'=>$monto, ':fg'=>$fecha_gen, ':fv'=>$fecha_venc, ':c'=>$conceptoFinal
       ]);
       if (!$ok) throw new Exception('No se pudo crear la cuota.');
-      audit($conexion, $adminId, "Creó cuota PENDIENTE (concepto=$concepto) para user #$iduser unidad #$id_unidad por Bs $monto");
+      audit($conexion, $adminId, "Creó cuota PENDIENTE (concepto={$conceptoFinal}) para user #$iduser unidad #$id_unidad por Bs $monto");
       json_out(true, 'Cuota creada correctamente.');
     } catch (\Throwable $e) {
       json_out(false, 'Error: '.$e->getMessage());
@@ -147,10 +154,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax'])) {
       $conexion->prepare("UPDATE cuota_mantenimiento SET estado='PAGADO' WHERE id_cuota=:id")
                ->execute([':id'=>$id_cuota]);
 
-      // 2) Crear registro en pago
-      $conexion->prepare("INSERT INTO pago (id_usuario, monto, fecha_pago, concepto, estado)
-                          VALUES (:u, :m, CURRENT_DATE, :c, 'PAGADO')")
-               ->execute([':u'=>$id_usuario, ':m'=>$monto, ':c'=>$concepto]);
+      // 2) Crear registro en pago (con registrado_por = admin)
+      $conexion->prepare("
+        INSERT INTO pago (id_usuario, monto, fecha_pago, concepto, estado, registrado_por)
+        VALUES (:u, :m, CURRENT_DATE, :c, 'PAGADO', :adm)
+      ")->execute([
+        ':u'=>$id_usuario, ':m'=>$monto, ':c'=>$concepto, ':adm'=>$adminId
+      ]);
 
       $id_pago = (int)$conexion->query("SELECT LASTVAL()")->fetchColumn();
 
@@ -185,11 +195,12 @@ if ($estado !== 'TODOS') {
   $where[] = "UPPER(c.estado) = 'PENDIENTE'";
 }
 if ($fconcept !== 'TODOS') {
-  $where[] = "UPPER(c.concepto) = :cn";
-  $params[':cn'] = $fconcept;
+  // Soportar prefijo (AGUA, ENERGIA, OTROS: algo)
+  $where[] = "UPPER(c.concepto) LIKE :cn";
+  $params[':cn'] = $fconcept.'%';
 }
 if ($q !== '') {
-  $where[] = "(LOWER(u.nombre) LIKE :q OR LOWER(u.apellido) LIKE :q OR LOWER(u.correo) LIKE :q OR LOWER(un.nro_unidad) LIKE :q)";
+  $where[] = "(LOWER(u.nombre) LIKE :q OR LOWER(u.apellido) LIKE :q OR LOWER(u.correo) LIKE :q OR LOWER(un.nro_unidad) LIKE :q OR LOWER(c.concepto) LIKE :q)";
   $params[':q'] = '%'.strtolower($q).'%';
 }
 if ($desde !== '') {
@@ -202,18 +213,29 @@ if ($hasta !== '') {
 }
 $whereSQL = $where ? ('WHERE '.implode(' AND ', $where)) : '';
 
-// Consulta base
+// Consulta base (incluye “Registrado por” si ya fue pagado)
 $sqlList = "
   SELECT 
     c.id_cuota, c.monto, c.fecha_generacion, c.fecha_vencimiento, c.estado, c.concepto,
     u.iduser, u.nombre, u.apellido, u.correo,
-    un.id_unidad, un.nro_unidad, b.nombre AS bloque, e.nombre AS edificio
+    un.id_unidad, un.nro_unidad, b.nombre AS bloque, e.nombre AS edificio,
+    px.id_pago AS pago_id, px.registrado_por AS pago_admin_id, ua.nombre AS admin_nom, ua.apellido AS admin_ape
   FROM cuota_mantenimiento c
   JOIN unidad un    ON un.id_unidad = c.id_unidad
   JOIN bloque b     ON b.id_bloque  = un.id_bloque
-  JOIN edificio e   ON e.id_edificio= b.id_edificio
+  JOIN edificio e   ON e.id_edificio = b.id_edificio
   JOIN residente_unidad ru ON ru.id_unidad = un.id_unidad
   JOIN usuario u    ON u.iduser = ru.id_usuario
+  LEFT JOIN LATERAL (
+     SELECT p.id_pago, p.registrado_por
+       FROM pago p
+      WHERE p.id_usuario = ru.id_usuario
+        AND p.concepto = ('Pago de ' || c.concepto || ' (cuota #' || c.id_cuota || ')')
+        AND UPPER(p.estado)='PAGADO'
+      ORDER BY p.id_pago DESC
+      LIMIT 1
+  ) px ON true
+  LEFT JOIN usuario ua ON ua.iduser = px.registrado_por
   $whereSQL
   ORDER BY c.fecha_vencimiento ASC, c.id_cuota ASC
 ";
@@ -225,10 +247,14 @@ $rows = $st->fetchAll(PDO::FETCH_ASSOC);
 if (isset($_GET['export']) && $_GET['export'] === 'csv') {
   header('Content-Type: text/csv; charset=UTF-8');
   header('Content-Disposition: attachment; filename="morosidad.csv"');
+  // BOM UTF-8
   echo "\xEF\xBB\xBF";
   $out = fopen('php://output', 'w');
-  fputcsv($out, ['CuotaID','Usuario','Correo','Unidad','Edificio','Bloque','Concepto','Monto','Vence','Estado'], ',');
+  fputcsv($out, ['CuotaID','Usuario','Correo','Unidad','Edificio','Bloque','Concepto','Monto','Vence','Estado','RegistradoPor'], ',');
   foreach ($rows as $r) {
+    $adminLabel = (trim(($r['admin_nom']??'').($r['admin_ape']??''))!=='')
+      ? trim(($r['admin_nom']??'').' '.($r['admin_ape']??''))
+      : '';
     fputcsv($out, [
       $r['id_cuota'],
       $r['nombre'].' '.$r['apellido'],
@@ -239,7 +265,8 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
       $r['concepto'],
       number_format((float)$r['monto'],2,'.',''),
       $r['fecha_vencimiento'],
-      $r['estado']
+      $r['estado'],
+      $adminLabel
     ], ',');
   }
   fclose($out);
@@ -271,7 +298,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'pdf') {
       <thead>
         <tr>
           <th>#</th><th>Usuario</th><th>Correo</th><th>Unidad</th><th>Edificio</th><th>Bloque</th>
-          <th>Concepto</th><th>Monto (Bs)</th><th>Vence</th><th>Estado</th>
+          <th>Concepto</th><th>Monto (Bs)</th><th>Vence</th><th>Estado</th><th>Registrado por</th>
         </tr>
       </thead>
       <tbody>
@@ -287,10 +314,11 @@ if (isset($_GET['export']) && $_GET['export'] === 'pdf') {
           <td style="text-align:right;"><?= number_format((float)$r['monto'],2) ?></td>
           <td><?= htmlspecialchars($r['fecha_vencimiento']) ?></td>
           <td><?= htmlspecialchars($r['estado']) ?></td>
+          <td><?= htmlspecialchars(trim(($r['admin_nom']??'').' '.($r['admin_ape']??''))) ?></td>
         </tr>
         <?php endforeach; ?>
         <?php if (!$rows): ?>
-          <tr><td colspan="10" style="text-align:center;color:#666;">Sin datos</td></tr>
+          <tr><td colspan="11" style="text-align:center;color:#666;">Sin datos</td></tr>
         <?php endif; ?>
       </tbody>
     </table>
@@ -348,6 +376,26 @@ while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
     .btn-domus{ background:var(--dark); color:#fff; border:none; border-radius:10px; }
     .btn-domus:hover{ background:var(--accent); }
     .badge-chip{ background:#e9f7f6; color:#0F3557; border-radius:20px; padding:.25rem .6rem; font-weight:600; }
+    .qr-box{width:220px;height:220px;border:2px dashed #1BAAA6;border-radius:12px;background:#e9f7f6;padding:8px;display:flex;align-items:center;justify-content:center;}
+
+    /* ==== Corrección de scroll horizontal y mobile ==== */
+    .table-wrap{ overflow-x: visible; } /* reemplaza a .table-responsive */
+    .table th, .table td{ white-space: normal; word-break: break-word; }
+
+    @media (max-width: 576px){
+      .th-email,.td-email,
+      .th-edificio,.td-edificio,
+      .th-bloque,.td-bloque,
+      .th-vence,.td-vence,
+      .th-registrado,.td-registrado{
+        display:none !important;
+      }
+      .table thead th, .table tbody td{
+        padding:.35rem .45rem;
+        font-size:.82rem;
+      }
+      .btn{ padding:.25rem .5rem; font-size:.78rem; }
+    }
   </style>
 </head>
 <body>
@@ -373,8 +421,8 @@ while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
   <div class="card card-box p-3 mb-3">
     <form class="row g-2 align-items-end" method="get">
       <div class="col-12 col-md-3">
-        <label class="form-label">Buscar (usuario/correo/unidad)</label>
-        <input type="text" name="q" class="form-control" value="<?= htmlspecialchars($q) ?>" placeholder="Ej. Juan, A-101">
+        <label class="form-label">Buscar (usuario/correo/unidad/concepto)</label>
+        <input type="text" name="q" class="form-control" value="<?= htmlspecialchars($q) ?>" placeholder="Ej. Juan, A-101, vidrio roto">
       </div>
       <div class="col-6 col-md-2">
         <label class="form-label">Desde (venc.)</label>
@@ -392,12 +440,12 @@ while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
         </select>
       </div>
       <div class="col-6 col-md-2">
-        <label class="form-label">Concepto</label>
+        <label class="form-label">Concepto (agrupado)</label>
         <select name="concepto" class="form-select">
           <option value="TODOS"   <?= $fconcept==='TODOS'?'selected':'' ?>>Todos</option>
           <option value="AGUA"    <?= $fconcept==='AGUA'?'selected':'' ?>>Agua</option>
           <option value="ENERGIA" <?= $fconcept==='ENERGIA'?'selected':'' ?>>Energía</option>
-          <option value="OTROS"   <?= $fconcept==='OTROS'?'selected':'' ?>>Otros</option>
+          <option value="OTROS"   <?= $fconcept==='OTROS'?'selected':'' ?>>Otros / Libre</option>
         </select>
       </div>
       <div class="col-12 col-md-1">
@@ -423,21 +471,22 @@ while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
 
   <!-- Tabla -->
   <div class="card card-box p-3">
-    <div class="table-responsive">
+    <div class="table-wrap">
       <table class="table table-hover align-middle">
         <thead>
           <tr>
             <th>#</th>
             <th>Usuario</th>
-            <th>Correo</th>
+            <th class="th-email">Correo</th>
             <th>Unidad</th>
-            <th>Edificio</th>
-            <th>Bloque</th>
+            <th class="th-edificio">Edificio</th>
+            <th class="th-bloque">Bloque</th>
             <th>Concepto</th>
             <th class="text-end">Monto (Bs)</th>
-            <th>Vence</th>
+            <th class="th-vence">Vence</th>
             <th>Estado</th>
-            <th style="width:160px;">Acciones</th>
+            <th class="th-registrado">Registrado por</th>
+            <th style="width:200px;">Acciones</th>
           </tr>
         </thead>
         <tbody>
@@ -445,20 +494,21 @@ while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
           <tr data-id="<?= (int)$r['id_cuota'] ?>">
             <td><?= (int)$r['id_cuota'] ?></td>
             <td><?= htmlspecialchars($r['nombre'].' '.$r['apellido']) ?></td>
-            <td><?= htmlspecialchars($r['correo']) ?></td>
+            <td class="td-email"><?= htmlspecialchars($r['correo']) ?></td>
             <td><?= htmlspecialchars($r['nro_unidad']) ?></td>
-            <td><?= htmlspecialchars($r['edificio']) ?></td>
-            <td><?= htmlspecialchars($r['bloque']) ?></td>
+            <td class="td-edificio"><?= htmlspecialchars($r['edificio']) ?></td>
+            <td class="td-bloque"><?= htmlspecialchars($r['bloque']) ?></td>
             <td>
               <?php
                 $tag = 'secondary';
-                if (strtoupper($r['concepto'])==='AGUA') $tag='info';
-                if (strtoupper($r['concepto'])==='ENERGIA') $tag='warning';
+                $uc = strtoupper($r['concepto']);
+                if (str_starts_with($uc,'AGUA'))    $tag='info';
+                if (str_starts_with($uc,'ENERGIA')) $tag='warning';
               ?>
               <span class="badge bg-<?= $tag ?>"><?= htmlspecialchars($r['concepto']) ?></span>
             </td>
             <td class="text-end"><?= number_format((float)$r['monto'],2) ?></td>
-            <td><?= htmlspecialchars($r['fecha_vencimiento']) ?></td>
+            <td class="td-vence"><?= htmlspecialchars($r['fecha_vencimiento']) ?></td>
             <td>
               <?php if (strtoupper($r['estado'])==='PENDIENTE'): ?>
                 <span class="badge bg-warning text-dark">Pendiente</span>
@@ -466,14 +516,23 @@ while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
                 <span class="badge bg-success">Pagado</span>
               <?php endif; ?>
             </td>
+            <td class="td-registrado">
+              <?php
+                $adm = trim(($r['admin_nom']??'').' '.($r['admin_ape']??''));
+                echo $adm ? htmlspecialchars($adm) : '—';
+              ?>
+            </td>
             <td>
               <?php if (strtoupper($r['estado'])==='PENDIENTE'): ?>
-                <button class="btn btn-sm btn-outline-success btn-pay"
+                <button class="btn btn-sm btn-outline-primary btn-pay"
                         data-id="<?= (int)$r['id_cuota'] ?>"
-                        data-monto="<?= (float)$r['monto'] ?>"
                         data-user="<?= htmlspecialchars($r['nombre'].' '.$r['apellido']) ?>"
+                        data-unidad="<?= htmlspecialchars($r['nro_unidad']) ?>"
+                        data-concepto="<?= htmlspecialchars($r['concepto']) ?>"
+                        data-vence="<?= htmlspecialchars($r['fecha_vencimiento']) ?>"
+                        data-monto="<?= number_format((float)$r['monto'],2,'.','') ?>"
                         data-bs-toggle="modal" data-bs-target="#modalPay">
-                  <i class="bi bi-cash-coin"></i> Pagar
+                  <i class="bi bi-qr-code"></i> Pagar (QR)
                 </button>
               <?php else: ?>
                 <span class="text-muted small">—</span>
@@ -482,7 +541,7 @@ while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
           </tr>
           <?php endforeach; ?>
           <?php if (!$rows): ?>
-            <tr><td colspan="11" class="text-center text-muted">No hay datos</td></tr>
+            <tr><td colspan="12" class="text-center text-muted">No hay datos</td></tr>
           <?php endif; ?>
         </tbody>
       </table>
@@ -490,7 +549,7 @@ while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
   </div>
 </div>
 
-<!-- MODAL: Agregar cuota -->
+<!-- MODAL: Agregar cuota (select + detalle opcional) -->
 <div class="modal fade" id="modalAddQuota" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog">
     <form class="modal-content" id="formAddQuota">
@@ -525,7 +584,7 @@ while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
 
         <div class="row g-2">
           <div class="col-6">
-            <label class="form-label">Concepto</label>
+            <label class="form-label">Concepto (agrupado)</label>
             <select class="form-select" name="concepto" required>
               <option value="AGUA">Agua</option>
               <option value="ENERGIA">Energía</option>
@@ -538,7 +597,14 @@ while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
           </div>
         </div>
 
-        <div class="row mt-2">
+        <!-- Detalle/observación opcional que se concatena al concepto -->
+        <div class="mt-2">
+          <label class="form-label">Detalle / Observación (opcional)</label>
+          <input type="text" class="form-control" name="concepto_detalle" placeholder="Ej. vidrio roto, control remoto perdido…">
+          <div class="form-text">Si lo completas, se grabará como “AGUA: detalle”, “ENERGIA: detalle” o “OTROS: detalle”.</div>
+        </div>
+
+        <div class="row mt-2 g-2">
           <div class="col">
             <label class="form-label">Generación</label>
             <input type="date" class="form-control" name="fecha_generacion" value="<?= date('Y-m-d') ?>">
@@ -557,12 +623,12 @@ while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
   </div>
 </div>
 
-<!-- MODAL: Registrar pago -->
+<!-- MODAL: Registrar pago con QR -->
 <div class="modal fade" id="modalPay" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog">
     <form class="modal-content" id="formPay">
       <div class="modal-header">
-        <h5 class="modal-title">Registrar pago</h5>
+        <h5 class="modal-title"><i class="bi bi-qr-code"></i> Registrar pago (QR)</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
@@ -575,15 +641,38 @@ while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
           <label class="form-label">Usuario</label>
           <input type="text" class="form-control" id="pay_user" disabled>
         </div>
+
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label">Unidad</label>
+            <input type="text" class="form-control" id="pay_unidad" disabled>
+          </div>
+          <div class="col-6">
+            <label class="form-label">Vence</label>
+            <input type="text" class="form-control" id="pay_vence" disabled>
+          </div>
+        </div>
+
+        <div class="mb-2 mt-2">
+          <label class="form-label">Concepto</label>
+          <input type="text" class="form-control" id="pay_concepto" disabled>
+        </div>
+
         <div class="mb-2">
           <label class="form-label">Monto (Bs)</label>
           <input type="text" class="form-control" id="pay_monto" disabled>
         </div>
-        <div class="form-text">Se marcará la cuota como <b>PAGADO</b>, se creará el registro en <b>pago</b> y se enviará un recibo por correo.</div>
+
+        <div class="my-3 d-flex justify-content-center">
+          <div class="qr-box">
+            <img id="pay_qr" src="" alt="QR" style="width:100%;height:100%;object-fit:contain;">
+          </div>
+        </div>
+        <div class="small text-muted text-center">Escanee el QR con el celular o confirme con “Pagar ahora”.</div>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
-        <button class="btn btn-domus" type="submit">Confirmar pago</button>
+        <button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">Cerrar</button>
+        <button class="btn btn-domus" type="submit"><i class="bi bi-cash-coin"></i> Pagar ahora</button>
       </div>
     </form>
   </div>
@@ -613,18 +702,34 @@ selUser?.addEventListener('change', ()=>{
   });
 });
 
-// ====== Modal: pagar (rellena datos) ======
+// ====== Modal: pagar (rellena datos + QR) ======
 document.querySelectorAll('.btn-pay').forEach(btn=>{
   btn.addEventListener('click', ()=>{
-    document.getElementById('pay_id_cuota').value = btn.getAttribute('data-id');
-    document.getElementById('pay_monto').value    = btn.getAttribute('data-monto');
-    document.getElementById('pay_user').value     = btn.getAttribute('data-user');
+    const id       = btn.getAttribute('data-id')||'0';
+    const user     = btn.getAttribute('data-user')||'—';
+    const unidad   = btn.getAttribute('data-unidad')||'—';
+    const vence    = btn.getAttribute('data-vence')||'—';
+    const monto    = btn.getAttribute('data-monto')||'0.00';
+    const concepto = btn.getAttribute('data-concepto')||'—';
+
+    document.getElementById('pay_id_cuota').value = id;
+    document.getElementById('pay_user').value     = user;
+    document.getElementById('pay_unidad').value   = unidad;
+    document.getElementById('pay_vence').value    = vence;
+    document.getElementById('pay_concepto').value = concepto;
+    document.getElementById('pay_monto').value    = parseFloat(monto).toFixed(2);
+
+    // Generar QR (informativo)
+    const data = encodeURIComponent(`iDomus|Cuota#${id}|Unidad:${unidad}|Concepto:${concepto}|Monto:Bs ${monto}|Vence:${vence}`);
+    const url  = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${data}`;
+    document.getElementById('pay_qr').src = url;
+
     const a = document.getElementById('alertPay');
     a.classList.add('d-none'); a.textContent='';
   });
 });
 
-// ====== Submit: pagar ======
+// ====== Submit: pagar (AJAX) ======
 document.getElementById('formPay').addEventListener('submit', async (e)=>{
   e.preventDefault();
   const a = document.getElementById('alertPay');
@@ -653,7 +758,7 @@ document.getElementById('formAddQuota').addEventListener('submit', async (e)=>{
   if (js.success) {
     a.className = 'alert alert-success'; a.textContent = js.message || 'Cuota creada.';
     a.classList.remove('d-none');
-    // Limpia y resetea para permitir nuevas invitaciones/cuotas seguidas
+    // Limpia y resetea para permitir nuevas cuotas seguidas
     e.target.reset();
     selUnit.innerHTML = '<option value="">Selecciona un usuario...</option>';
     setTimeout(()=> location.reload(), 900);

@@ -10,6 +10,10 @@ if (empty($_SESSION['iduser']) || (($_SESSION['rol'] ?? '') !== 'admin')) {
 }
 $idAdmin = (int)$_SESSION['iduser'];
 
+// Datos de sesión para el chip de usuario en navbar
+$nombre = $_SESSION['nombre'] ?? 'Administrador';
+$rol    = $_SESSION['rol'] ?? 'admin';
+
 // ===== Helpers UI =====
 function estado_badge(string $estado): string {
   $e = strtoupper(trim($estado));
@@ -68,7 +72,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action'] ?? '')==='crear') {
     $st->execute([':a'=>$id_area, ':u'=>$id_usuario, ':i'=>$inicio, ':f'=>$fin, ':n'=>$nota]);
     $idNew = (int)$st->fetchColumn();
 
-    // (opcional) auditoría si existe la tabla
+    // (opcional) auditoría
     try {
       $conexion->prepare("INSERT INTO auditoria (id_usuario, accion, modulo, ip_origen)
                           VALUES (:u,:acc,'Reservas',:ip)")
@@ -77,7 +81,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action'] ?? '')==='crear') {
                  ':acc'=>"Creó reserva #$idNew para usuario $id_usuario",
                  ':ip'=>$_SERVER['REMOTE_ADDR'] ?? 'cli'
                ]);
-    } catch (\Throwable $e) { /* ignorar si no existe tabla */ }
+    } catch (\Throwable $e) { /* ignorar si no existe auditoría */ }
 
     header('Location: reservas.php?ok=1'); exit;
   } else {
@@ -126,30 +130,42 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action'] ?? '')==='cancelar'
   header('Location: reservas.php'); exit;
 }
 
-// ===== LISTA RESERVAS =====
+// ===== LISTA RESERVAS (incluye estado_pago si existe) =====
 try {
+$sqlLista = "
+  SELECT r.id_reserva,
+         a.nombre_area,
+         (u.nombre||' '||u.apellido) AS usuario,
+         r.fecha_inicio, r.fecha_fin, r.estado, r.nota,
+
+         -- 👇 AGREGAR AQUÍ
+         COALESCE((
+           SELECT CASE WHEN COUNT(1)>0 THEN 'PAGADO' ELSE 'PENDIENTE' END
+           FROM pago p
+           WHERE p.id_usuario = r.id_usuario
+             AND p.estado = 'Pagado'
+             AND p.concepto ILIKE ('Reserva #'||r.id_reserva||'%')
+         ), 'PENDIENTE') AS estado_pago,
+
+         ua.nombre||' '||ua.apellido AS admin_aprobo,
+         uc.nombre||' '||uc.apellido AS admin_cancelo,
+         r.fecha_aprobacion, r.fecha_cancelacion, r.motivo_cancelacion
+    FROM reserva r
+    JOIN area_comun a ON a.id_area=r.id_area
+    JOIN usuario u    ON u.iduser=r.id_usuario
+LEFT JOIN usuario ua  ON ua.iduser=r.aprobado_por
+LEFT JOIN usuario uc  ON uc.iduser=r.cancelado_por
+ORDER BY r.fecha_inicio DESC
+";
+  $reservas = $conexion->query($sqlLista)->fetchAll(PDO::FETCH_ASSOC);
+} catch (\Throwable $e) {
+  // versión mínima si no existen columnas nuevas
   $sqlLista = "
     SELECT r.id_reserva,
            a.nombre_area,
            (u.nombre||' '||u.apellido) AS usuario,
            r.fecha_inicio, r.fecha_fin, r.estado, r.nota,
-           r.fecha_aprobacion, r.fecha_cancelacion, r.motivo_cancelacion,
-           ua.nombre||' '||ua.apellido AS admin_aprobo,
-           uc.nombre||' '||uc.apellido AS admin_cancelo
-      FROM reserva r
-      JOIN area_comun a ON a.id_area=r.id_area
-      JOIN usuario u    ON u.iduser=r.id_usuario
- LEFT JOIN usuario ua   ON ua.iduser=r.aprobado_por
- LEFT JOIN usuario uc   ON uc.iduser=r.cancelado_por
-  ORDER BY r.fecha_inicio DESC";
-  $reservas = $conexion->query($sqlLista)->fetchAll(PDO::FETCH_ASSOC);
-} catch (\Throwable $e) {
-  // versión mínima si no existen columnas de auditoría
-  $sqlLista = "
-    SELECT r.id_reserva,
-           a.nombre_area,
-           (u.nombre||' '||u.apellido) AS usuario,
-           r.fecha_inicio, r.fecha_fin, r.estado, r.nota
+           COALESCE(r.estado_pago,'PENDIENTE') AS estado_pago
       FROM reserva r
       JOIN area_comun a ON a.id_area=r.id_area
       JOIN usuario u    ON u.iduser=r.id_usuario
@@ -220,12 +236,58 @@ foreach($rowsCal as $ev){
     .fc .fc-button-primary{ background:var(--primary); border:none; }
     .fc .fc-button-primary:hover{ background:var(--secondary); }
     .fc .fc-daygrid-event{ border-radius:8px; font-weight:600; }
+
+    .user-chip{
+      background:#e9f7f6; 
+      color:#0F3557; 
+      border-radius:20px; 
+      padding:.35rem .6rem; 
+      font-weight:600; 
+      display:inline-flex; 
+      gap:.4rem; 
+      align-items:center; 
+    }
+    .user-chip i{ color:#1BAAA6; }
+    .user-chip-sm{
+      background:#e9f7f6;
+      color:#0F3557;
+      border-radius:18px;
+      padding:.25rem .45rem;
+      font-weight:600;
+      display:inline-flex;
+      gap:.35rem;
+      align-items:center;
+      font-size:.9rem;
+    }
+    .user-chip-sm i{ color:#1BAAA6; }
   </style>
 </head>
 <body>
 <nav class="navbar navbar-dark px-3">
-  <a class="navbar-brand text-white" href="dashboard.php"><i class="bi bi-arrow-left-circle"></i> Volver</a>
-  <span class="text-white fw-bold">Gestión de Reservas (Admin)</span>
+  <div class="container-fluid d-flex align-items-center">
+    <!-- Izquierda -->
+    <a class="navbar-brand text-white" href="dashboard.php">
+      <i class="bi bi-arrow-left-circle"></i> Volver
+    </a>
+
+    <!-- Derecha -->
+    <div class="ms-auto d-flex align-items-center gap-3">
+      <!-- Título -->
+      <span class="text-white fw-bold">Gestión de Reservas (Admin)</span>
+
+      <!-- Desktop (≥576px): nombre + rol -->
+      <span class="user-chip d-none d-sm-inline-flex">
+        <i class="bi bi-person-circle"></i>
+        <?= htmlspecialchars($nombre) ?> · <?= htmlspecialchars(ucfirst($rol)) ?>
+      </span>
+
+      <!-- Móvil (<576px): versión compacta -->
+      <span class="user-chip-sm d-inline-flex d-sm-none">
+        <i class="bi bi-person-circle"></i>
+        <?= htmlspecialchars(ucfirst($rol)) ?>
+      </span>
+    </div>
+  </div>
 </nav>
 
 <div class="container my-4">
@@ -253,6 +315,7 @@ foreach($rowsCal as $ev){
           <th>Inicio</th>
           <th>Fin</th>
           <th>Estado</th>
+          <th>Pago</th>
           <th>Acción</th>
         </tr>
       </thead>
@@ -261,49 +324,81 @@ foreach($rowsCal as $ev){
         $estado = strtoupper(trim($r['estado'] ?? ''));
         $badge  = estado_badge($estado);
       ?>
-        <tr>
-          <td><?= $i+1 ?></td>
-          <td><?= htmlspecialchars($r['nombre_area'] ?? '') ?></td>
-          <td><?= htmlspecialchars($r['usuario'] ?? '') ?></td>
-          <td><?= !empty($r['fecha_inicio'])? date('d/m/Y H:i',strtotime($r['fecha_inicio'])):'—' ?></td>
-          <td><?= !empty($r['fecha_fin'])? date('d/m/Y H:i',strtotime($r['fecha_fin'])):'—' ?></td>
-          <td><span class="badge <?= $badge ?>"><?= htmlspecialchars($estado) ?></span></td>
-          <td>
-            <?php if ($estado==='PENDIENTE'): ?>
-              <form method="post" class="d-inline">
-                <input type="hidden" name="action" value="confirmar">
-                <input type="hidden" name="id_reserva" value="<?= (int)$r['id_reserva'] ?>">
-                <button class="btn btn-sm btn-outline-success"><i class="bi bi-check2-circle"></i> Confirmar</button>
-              </form>
-              <button class="btn btn-sm btn-outline-danger"
-                      data-bs-toggle="modal"
-                      data-bs-target="#modalCancelar"
-                      data-id="<?= (int)$r['id_reserva'] ?>">
-                <i class="bi bi-x-circle"></i> Cancelar
-              </button>
-            <?php elseif ($estado==='APROBADA'): ?>
-              <div class="small-muted">
-                <i class="bi bi-person-check"></i>
-                Aprobada por: <b><?= htmlspecialchars($r['admin_aprobo'] ?? '—') ?></b><br>
-                <i class="bi bi-clock"></i>
-                <?= !empty($r['fecha_aprobacion'])? date('d/m/Y H:i',strtotime($r['fecha_aprobacion'])): '—' ?>
-              </div>
-            <?php elseif ($estado==='CANCELADA'): ?>
-              <div class="small-muted">
-                <i class="bi bi-person-x"></i>
-                Cancelada por: <b><?= htmlspecialchars($r['admin_cancelo'] ?? '—') ?></b><br>
-                <i class="bi bi-clock"></i>
-                <?= !empty($r['fecha_cancelacion'])? date('d/m/Y H:i',strtotime($r['fecha_cancelacion'])): '—' ?><br>
-                <?php if(!empty($r['motivo_cancelacion'])): ?>
-                  <i class="bi bi-chat-left-text"></i>
-                  Motivo: <em><?= htmlspecialchars($r['motivo_cancelacion']) ?></em>
-                <?php endif; ?>
-              </div>
-            <?php else: ?>
-              <span class="badge <?= $badge ?>"><?= htmlspecialchars($estado) ?></span>
-            <?php endif; ?>
-          </td>
-        </tr>
+<!-- ====== INICIO BLOQUE FILA (REEMPLAZAR SOLO EL <tr>...</tr>) ====== -->
+<tr>
+  <td><?= $i+1 ?></td>
+  <td><?= htmlspecialchars($r['nombre_area'] ?? '') ?></td>
+  <td><?= htmlspecialchars($r['usuario'] ?? '') ?></td>
+  <td><?= !empty($r['fecha_inicio'])? date('d/m/Y H:i',strtotime($r['fecha_inicio'])):'—' ?></td>
+  <td><?= !empty($r['fecha_fin'])? date('d/m/Y H:i',strtotime($r['fecha_fin'])):'—' ?></td>
+
+  <!-- Estado general -->
+  <td>
+    <?php
+      $estado = strtoupper(trim($r['estado'] ?? ''));
+      $badge  = estado_badge($estado);
+    ?>
+    <span class="badge <?= $badge ?>"><?= htmlspecialchars($estado) ?></span>
+  </td>
+
+  <!-- Estado de pago + botón Link -->
+  <td>
+    <?php
+      // Opción 2: si el SQL no trae estado_pago, asumimos PENDIENTE.
+      $sp = strtoupper($r['estado_pago'] ?? 'PENDIENTE');
+      $badgep = ($sp==='PAGADO' ? 'bg-success' : ($sp==='PENDIENTE' ? 'bg-warning text-dark' : 'bg-secondary'));
+    ?>
+    <span class="badge <?= $badgep ?>"><?= htmlspecialchars($sp) ?></span>
+
+    <?php if (($estado==='APROBADA') && ($sp!=='PAGADO')): ?>
+      <button class="btn btn-sm btn-outline-primary ms-2"
+              onclick="generarLinkPago(<?= (int)$r['id_reserva'] ?>)">
+        <i class="bi bi-link-45deg"></i> Link
+      </button>
+    <?php endif; ?>
+  </td>
+
+  <!-- Acciones -->
+  <td>
+    <?php if ($estado==='PENDIENTE'): ?>
+      <form method="post" class="d-inline">
+        <input type="hidden" name="action" value="confirmar">
+        <input type="hidden" name="id_reserva" value="<?= (int)$r['id_reserva'] ?>">
+        <button class="btn btn-sm btn-outline-success">
+          <i class="bi bi-check2-circle"></i> Confirmar
+        </button>
+      </form>
+
+      <button class="btn btn-sm btn-outline-danger"
+              data-bs-toggle="modal"
+              data-bs-target="#modalCancelar"
+              data-id="<?= (int)$r['id_reserva'] ?>">
+        <i class="bi bi-x-circle"></i> Cancelar
+      </button>
+
+    <?php elseif ($estado==='APROBADA'): ?>
+      <div class="small-muted">
+        <i class="bi bi-person-check"></i>
+        Aprobada por: <b><?= htmlspecialchars($r['admin_aprobo'] ?? '—') ?></b><br>
+        <i class="bi bi-clock"></i>
+        <?= !empty($r['fecha_aprobacion'])? date('d/m/Y H:i',strtotime($r['fecha_aprobacion'])): '—' ?>
+      </div>
+
+    <?php elseif ($estado==='CANCELADA'): ?>
+      <div class="small-muted">
+        <i class="bi bi-person-x"></i>
+        Cancelada por: <b><?= htmlspecialchars($r['admin_cancelo'] ?? '—') ?></b><br>
+        <i class="bi bi-clock"></i>
+        <?= !empty($r['fecha_cancelacion'])? date('d/m/Y H:i',strtotime($r['fecha_cancelacion'])): '—' ?><br>
+        <?php if(!empty($r['motivo_cancelacion'])): ?>
+          <i class="bi bi-chat-left-text"></i>
+          Motivo: <em><?= htmlspecialchars($r['motivo_cancelacion']) ?></em>
+        <?php endif; ?>
+      </div>
+    <?php endif; ?>
+  </td>
+</tr>
+<!-- ====== FIN BLOQUE FILA ====== -->
       <?php endforeach; ?>
       </tbody>
     </table>
@@ -419,6 +514,44 @@ foreach($rowsCal as $ev){
     eventDisplay: 'block'
   });
   cal.render();
+
+  // === Generar link/QR de pago (abre nueva pestaña) ===
+  async function crearPago(id){
+    const fd = new FormData();
+    fd.set('action','crear_pago_reserva');
+    fd.set('id_reserva', id);
+
+    // API de pagos (crearemos este archivo en el siguiente paso)
+    const res = await fetch('../pagos/pagos_api.php', { method:'POST', body: fd });
+    const js  = await res.json().catch(()=>({success:false,message:'JSON inválido'}));
+
+    if (js.success && js.url) {
+      // ej: js.url = "pagar_reserva.php?token=XXXX"
+      window.open('../pagos/'+js.url, '_blank');
+    } else {
+      alert(js.message || 'No se pudo generar el link de pago.');
+    }
+  }
 </script>
+<!-- ====== INICIO BLOQUE JS: Link de pago (mock) ====== -->
+<script>
+  // Genera un link de pago "didáctico" (simulado) y lo copia al portapapeles
+  function generarLinkPago(idReserva){
+    // Puedes cambiar esta ruta por donde pongamos el pago mock real
+    const url = `${location.origin}/iDomus/app/views/usuario/pago_demo.php?id_reserva=` + encodeURIComponent(idReserva);
+
+    // Copiamos al portapapeles (si el navegador lo permite)
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(()=>{
+        alert('Link de pago copiado:\n' + url);
+      }).catch(()=>{
+        alert('Link de pago:\n' + url);
+      });
+    } else {
+      alert('Link de pago:\n' + url);
+    }
+  }
+</script>
+<!-- ====== FIN BLOQUE JS ====== -->
 </body>
 </html>

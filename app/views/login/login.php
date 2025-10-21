@@ -208,7 +208,7 @@ if (isset($_GET['logout'])) {
 </head>
 <body>
   <div class="login-card">
-    <img src="../../../public/img/iDomus_logo.png" alt="iDomus Logo" class="login-logo">
+    <a href="../../../index.php" aria-label="Ir a inicio"><img src="../../../public/img/iDomus_logo.png" alt="iDomus Logo" class="login-logo"></a>
     <div class="login-title">Login</div>
 
     <?php if ($mensaje): ?>
