@@ -102,6 +102,66 @@ foreach ($period as $dt) {
   $dataMorCnt[] = $mapM[$k] ?? 0;
 }
 
+/** Serie Ingresos vs Egresos (últimos 6 meses) */
+$stmt = $conexion->query("
+  SELECT TO_CHAR(DATE_TRUNC('month', fecha), 'YYYY-MM') AS ym,
+         UPPER(tipo) AS tipo,
+         SUM(monto) AS total
+  FROM movimiento_financiero
+  WHERE fecha >= (CURRENT_DATE - INTERVAL '5 months')
+  GROUP BY ym, tipo
+  ORDER BY ym
+");
+$rowsIE = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$labelsIE = [];
+$dataIng  = [];
+$dataEgr  = [];
+
+// Mapear resultados por mes
+$mapIng = []; $mapEgr = [];
+foreach ($rowsIE as $r) {
+  $k = $r['ym'];
+  $t = $r['tipo'];
+  $v = (float)$r['total'];
+  if ($t === 'INGRESO') $mapIng[$k] = ($mapIng[$k] ?? 0) + $v;
+  if ($t === 'EGRESO')  $mapEgr[$k] = ($mapEgr[$k] ?? 0) + $v;
+}
+
+// Asegurar meses vacíos con 0 y etiquetas ordenadas (reusa $period)
+foreach ($period as $dt) {
+  $k = $dt->format('Y-m');
+  $labelsIE[] = $k;
+  $dataIng[]  = $mapIng[$k] ?? 0.0;
+  $dataEgr[]  = $mapEgr[$k] ?? 0.0;
+}
+
+/** Serie Pagos a Personal (últimos 6 meses) */
+try {
+  $stmt = $conexion->query("
+    SELECT TO_CHAR(DATE_TRUNC('month', pp.fecha_pago), 'YYYY-MM') AS ym,
+           SUM(pp.monto) AS total
+    FROM pago_personal pp
+    WHERE pp.fecha_pago >= (CURRENT_DATE - INTERVAL '5 months')
+    GROUP BY ym
+    ORDER BY ym
+  ");
+  $rowsPP = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {
+  $rowsPP = [];
+}
+
+$labelsPP = [];
+$dataPP   = [];
+$mapPP = [];
+foreach ($rowsPP as $r) { $mapPP[$r['ym']] = (float)$r['total']; }
+
+foreach ($period as $dt) {
+  $k = $dt->format('Y-m');
+  $labelsPP[] = $k;
+  $dataPP[]   = $mapPP[$k] ?? 0.0;
+}
+
 /** ========== RESERVAS (UN SOLO KPI) ========== */
 /** Reservas activas ahora (APROBADAS y en curso) */
 $stmt = $conexion->query("
@@ -342,31 +402,58 @@ try {
 
   </div>
 
-  <!-- Gráficas -->
-  <div class="row g-3 mt-1">
-    <div class="col-12 col-lg-6">
-      <div class="card card-chart p-3">
-        <div class="d-flex justify-content-between">
-          <h6 class="mb-3">Pagos últimos 6 meses</h6>
-          <div class="d-flex gap-2">
-            <a class="btn btn-sm btn-outline-secondary" href="finanzas.php"><i class="bi bi-arrow-right-circle"></i></a>
-          </div>
+<!-- Gráficas -->
+<div class="row g-3 mt-1">
+  <div class="col-12 col-lg-6">
+    <div class="card card-chart p-3">
+      <div class="d-flex justify-content-between">
+        <h6 class="mb-3">Pagos últimos 6 meses</h6>
+        <div class="d-flex gap-2">
+          <a class="btn btn-sm btn-outline-secondary" href="finanzas.php"><i class="bi bi-arrow-right-circle"></i></a>
         </div>
-        <canvas id="chartPagos" height="140"></canvas>
       </div>
-    </div>
-    <div class="col-12 col-lg-6">
-      <div class="card card-chart p-3">
-        <div class="d-flex justify-content-between">
-          <h6 class="mb-3">Morosidad (cuotas pendientes) 6 meses</h6>
-          <div class="d-flex gap-2">
-            <a class="btn btn-sm btn-outline-secondary" href="morosidad.php"><i class="bi bi-arrow-right-circle"></i></a>
-          </div>
-        </div>
-        <canvas id="chartMorosidad" height="140"></canvas>
-      </div>
+      <canvas id="chartPagos" height="140"></canvas>
     </div>
   </div>
+
+  <div class="col-12 col-lg-6">
+    <div class="card card-chart p-3">
+      <div class="d-flex justify-content-between">
+        <h6 class="mb-3">Morosidad (cuotas pendientes) 6 meses</h6>
+        <div class="d-flex gap-2">
+          <a class="btn btn-sm btn-outline-secondary" href="morosidad.php"><i class="bi bi-arrow-right-circle"></i></a>
+        </div>
+      </div>
+      <canvas id="chartMorosidad" height="140"></canvas>
+    </div>
+  </div>
+
+  <!-- Ingresos vs Egresos (lado a lado como las primeras) -->
+  <div class="col-12 col-lg-6">
+    <div class="card card-chart p-3">
+      <div class="d-flex justify-content-between">
+        <h6 class="mb-3">Ingresos vs Egresos (últimos 6 meses)</h6>
+        <div class="d-flex gap-2">
+          <a class="btn btn-sm btn-outline-secondary" href="finanzas.php"><i class="bi bi-arrow-right-circle"></i></a>
+        </div>
+      </div>
+      <canvas id="chartIE" height="140"></canvas>
+    </div>
+  </div>
+
+  <!-- Pagos a Personal (lado a lado como las primeras) -->
+  <div class="col-12 col-lg-6">
+    <div class="card card-chart p-3">
+      <div class="d-flex justify-content-between">
+        <h6 class="mb-3">Pagos a Personal (últimos 6 meses)</h6>
+        <div class="d-flex gap-2">
+          <a class="btn btn-sm btn-outline-secondary" href="pagoApersonal.php"><i class="bi bi-arrow-right-circle"></i></a>
+        </div>
+      </div>
+      <canvas id="chartPagoPersonal" height="140"></canvas>
+    </div>
+  </div>
+</div>
 
   <!-- Accesos rápidos -->
   <div class="row g-3 mt-1">
@@ -407,6 +494,68 @@ try {
     type: 'line',
     data: { labels: labelsMor, datasets: [{ label:'Cuotas pendientes', data: dataMor, tension:.3 }] },
     options: { responsive:true, plugins:{ legend:{ display:false } }, scales:{ y:{ beginAtZero:true, precision:0 } } }
+  });
+
+  //ingresos vs egresos
+  const labelsIE = <?= json_encode($labelsIE, JSON_UNESCAPED_UNICODE) ?>;
+  const dataIng  = <?= json_encode($dataIng) ?>;
+  const dataEgr  = <?= json_encode($dataEgr) ?>;
+
+  const ctxIE = document.getElementById('chartIE').getContext('2d');
+  new Chart(ctxIE, {
+    type: 'bar',
+    data: {
+      labels: labelsIE,
+      datasets: [
+        {
+          label: 'Ingresos',
+          data: dataIng,
+          backgroundColor: '#1BAAA6',
+          borderColor: '#1BAAA6'
+        },
+        {
+          label: 'Egresos',
+          data: dataEgr,
+          backgroundColor: '#0F3557',
+          borderColor: '#0F3557'
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: true }
+      },
+      scales: {
+        y: { beginAtZero: true }
+      }
+    }
+  });
+
+  //pagos a personal
+  const labelsPP = <?= json_encode($labelsPP, JSON_UNESCAPED_UNICODE) ?>;
+  const dataPP   = <?= json_encode($dataPP) ?>;
+
+  const ctxPP = document.getElementById('chartPagoPersonal').getContext('2d');
+  new Chart(ctxPP, {
+    type: 'line',
+    data: {
+      labels: labelsPP,
+      datasets: [{
+        label: 'Total pagado (Bs)',
+        data: dataPP,
+        borderColor: '#0F3557',     // primary
+        backgroundColor: 'rgba(27,170,166,0.15)', // secondary suave
+        tension: .3,
+        fill: true,
+        pointRadius: 3
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true } }
+    }
   });
 </script>
 </body>

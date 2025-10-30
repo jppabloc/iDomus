@@ -222,6 +222,36 @@ if (isset($_GET['export']) && $_GET['export']==='csv') {
     font-size:.9rem;
   }
   .user-chip-sm i{ color:#1BAAA6; }
+
+  /* ===== Acciones rápidas fijo (debajo del navbar) ===== */
+.fin-actions{
+  position: sticky;
+  top: var(--navH, 56px);   /* se ajusta con JS según la altura real del navbar */
+  z-index: 1030;            /* por encima del contenido, debajo de modales */
+  background: linear-gradient(90deg, #0F35571a, #1BAAA61a); /* primary → secondary con transparencia */
+  border-bottom: 1px solid #0F355733;
+  backdrop-filter: blur(4px);
+}
+
+.fin-actions .title{
+  color: var(--dark); /* ya definido en tu CSS como #0F3557 */
+  font-weight: 700;
+}
+
+.fin-actions .icon{
+  color: #1BAAA6; /* secondary */
+}
+
+/* Mejoras de contraste para botones del bar */
+.fin-actions .btn{
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+/* Ocultar en impresión */
+@media print{
+  .fin-actions{ display:none!important; }
+}
   </style>
 </head>
 <body>
@@ -248,6 +278,24 @@ if (isset($_GET['export']) && $_GET['export']==='csv') {
     </div>
   </div>
 </nav>
+
+<!-- Acciones rápidas de Finanzas (fijo) -->
+<div class="fin-actions no-print">
+  <div class="container-xxl d-flex flex-wrap justify-content-between align-items-center gap-2 py-2">
+    <div class="title d-flex align-items-center gap-2">
+      <i class="bi bi-gear-fill icon"></i>
+      <span>Acciones · Finanzas</span>
+    </div>
+    <div class="d-flex flex-wrap gap-2">
+      <a class="btn btn-outline-success btn-sm" href="ingresosEgresos.php">
+        <i class="bi bi-cash-coin"></i> Ingresos / Egresos
+      </a>
+      <a class="btn btn-outline-primary btn-sm" href="pagoApersonal.php">
+        <i class="bi bi-people-fill"></i> Pagos a Personal
+      </a>
+    </div>
+  </div>
+</div>
 
 <div class="container-xxl my-4">
 
@@ -468,6 +516,20 @@ if (isset($_GET['export']) && $_GET['export']==='csv') {
 
   // Inicializar con lo que vino del servidor
   fillBloques();
+
+  // Ajusta dinámicamente la altura del navbar para el sticky
+  (function(){
+    const nav = document.querySelector('.navbar');
+    const root = document.documentElement;
+    function setNavH(){
+      if(!nav) return;
+      const h = nav.offsetHeight || 56;
+      root.style.setProperty('--navH', h + 'px');
+    }
+    setNavH();
+    window.addEventListener('resize', setNavH);
+  })();
+
 </script>
 </body>
 </html>
