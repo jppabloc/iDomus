@@ -1,557 +1,772 @@
 <?php
-// app/views/dashboard/reservas.php
-declare(strict_types=1);
+// app/views/dashboard/morosidad.php
 session_start();
 require_once '../../models/conexion.php';
 
-// --- SOLO ADMIN ---
-if (empty($_SESSION['iduser']) || (($_SESSION['rol'] ?? '') !== 'admin')) {
-  header('Location: ../login/login.php'); exit;
-}
-$idAdmin = (int)$_SESSION['iduser'];
-
-// Datos de sesión para el chip de usuario en navbar
-$nombre = $_SESSION['nombre'] ?? 'Administrador';
-$rol    = $_SESSION['rol'] ?? 'admin';
-
-// ===== Helpers UI =====
-function estado_badge(string $estado): string {
-  $e = strtoupper(trim($estado));
-  return match($e){
-    'APROBADA'  => 'bg-success',
-    'CANCELADA' => 'bg-danger',
-    'PENDIENTE' => 'bg-warning text-dark',
-    'RECHAZADA' => 'bg-secondary',
-    default     => 'bg-secondary'
-  };
-}
-// Normaliza fechas (dd/mm/aaaa o yyyy-mm-ddTHH:MM)
-function normDate(?string $d): ?string {
-  $d = trim((string)$d);
-  if ($d==='') return null;
-  if (preg_match('#^(\d{2})/(\d{2})/(\d{4})$#',$d,$m)) {
-    return "{$m[3]}-{$m[2]}-{$m[1]}";
-  }
-  if (preg_match('#^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}#',$d)) {
-    return str_replace('T',' ',substr($d,0,16));
-  }
-  return $d;
+// ====== Guardas: solo ADMIN ======
+if (empty($_SESSION['iduser']) || ($_SESSION['rol'] ?? '') !== 'admin') {
+  header('Location: ../login/login.php');
+  exit;
 }
 
-// ===== INSERTAR NUEVA RESERVA (ADMIN) =====
-if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action'] ?? '')==='crear') {
-  $id_area    = (int)($_POST['id_area'] ?? 0);
-  $id_usuario = (int)($_POST['id_usuario'] ?? 0);
-  $inicio     = normDate($_POST['fecha_inicio'] ?? '');
-  $fin        = normDate($_POST['fecha_fin'] ?? '');
-  $nota       = trim($_POST['nota'] ?? '');
+function json_out($ok, $msg = '', $extra = []) {
+  header('Content-Type: application/json; charset=UTF-8');
+  echo json_encode(array_merge(['success'=>$ok, 'message'=>$msg], $extra));
+  exit;
+}
 
-  if ($id_area && $id_usuario && $inicio && $fin) {
-    // Evita NOTICES en salida (por triggers)
-    $conexion->exec("SET client_min_messages TO WARNING");
+function audit(PDO $db, int $iduser, string $accion, string $modulo = 'morosidad') {
+  try {
+    $db->prepare("INSERT INTO auditoria (id_usuario, accion, ip_origen, modulo) VALUES (:u,:a,:ip,:m)")
+       ->execute([
+         ':u'=>$iduser, ':a'=>$accion,
+         ':ip'=>($_SERVER['REMOTE_ADDR'] ?? 'n/a'),
+         ':m'=>$modulo
+       ]);
+  } catch (\Throwable $e) {}
+}
 
-    // Validación solapamiento (PENDIENTE/APROBADA) para la misma área
-    $sqlOv = "SELECT 1
-              FROM reserva
-              WHERE id_area=:a
-                AND estado IN ('PENDIENTE','APROBADA')
-                AND tstzrange(fecha_inicio, fecha_fin, '[)') &&
-                    tstzrange(:i::timestamp, :f::timestamp, '[)')
-              LIMIT 1";
-    $stOv = $conexion->prepare($sqlOv);
-    $stOv->execute([':a'=>$id_area, ':i'=>$inicio, ':f'=>$fin]);
-    if ($stOv->fetchColumn()) {
-      header('Location: reservas.php?err=solapamiento'); exit;
+function get_user_email(PDO $db, int $iduser): ?string {
+  $st = $db->prepare("SELECT correo FROM usuario WHERE iduser=:id LIMIT 1");
+  $st->execute([':id'=>$iduser]);
+  return $st->fetchColumn() ?: null;
+}
+
+function get_user_name(PDO $db, int $iduser): string {
+  $st = $db->prepare("SELECT CONCAT(nombre,' ',apellido) FROM usuario WHERE iduser=:id LIMIT 1");
+  $st->execute([':id'=>$iduser]);
+  return $st->fetchColumn() ?: 'Usuario';
+}
+
+function send_receipt_email(PDO $db, int $id_pago): void {
+  $sql = "SELECT p.id_pago, p.monto, p.fecha_pago, p.concepto, p.estado,
+                 u.iduser, u.nombre, u.apellido, u.correo
+          FROM pago p
+          JOIN usuario u ON u.iduser = p.id_usuario
+          WHERE p.id_pago = :id LIMIT 1";
+  $st = $db->prepare($sql);
+  $st->execute([':id'=>$id_pago]);
+  $row = $st->fetch(PDO::FETCH_ASSOC);
+  if (!$row) return;
+
+  $nombre = htmlspecialchars($row['nombre'].' '.$row['apellido']);
+  $monto  = number_format((float)$row['monto'],2);
+  $fecha  = htmlspecialchars($row['fecha_pago']);
+  $concepto = htmlspecialchars($row['concepto'] ?: 'Pago de cuota');
+  $correo = $row['correo'];
+
+  $asunto = "iDomus - Recibo de pago #".$row['id_pago'];
+  $html = '
+  <!doctype html><html><head><meta charset="utf-8"><style>
+    body{font-family:Arial,sans-serif;background:#f4f6f8;padding:16px;}
+    .card{max-width:560px;margin:auto;background:#fff;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.09);padding:18px;}
+    .hdr{background:#023047;color:#fff;padding:14px;border-radius:10px;font-weight:700;}
+    .row{margin:10px 0;}
+    .foot{color:#6c7a89;font-size:12px;margin-top:12px;text-align:center;}
+  </style></head>
+  <body>
+    <div class="card">
+      <div class="hdr">Recibo de pago iDomus</div>
+      <p>Hola <b>'.$nombre.'</b>, te confirmamos el registro de tu pago.</p>
+      <div class="row"><b>Concepto:</b> '.$concepto.'</div>
+      <div class="row"><b>Monto:</b> Bs '.$monto.'</div>
+      <div class="row"><b>Fecha:</b> '.$fecha.'</div>
+      <div class="foot">&copy; '.date('Y')." iDomus".'</div>
+    </div>
+  </body></html>';
+
+  $headers  = "MIME-Version: 1.0\r\n";
+  $headers .= "Content-type: text/html; charset=UTF-8\r\n";
+  $headers .= "From: iDomus <noreply@idomus.com>\r\n";
+
+  @mail($correo, $asunto, $html, $headers);
+}
+
+// ====== AJAX: crear cuota / registrar pago ======
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax'])) {
+  $action  = $_POST['action'] ?? '';
+  $adminId = (int)($_SESSION['iduser'] ?? 0);
+
+  // ---- Crear cuota pendiente (mantiene select + detalle opcional) ----
+  if ($action === 'add_quota') {
+    $iduser           = (int)($_POST['iduser'] ?? 0);
+    $id_unidad        = (int)($_POST['id_unidad'] ?? 0);
+    $conceptoCat      = strtoupper(trim($_POST['concepto'] ?? 'OTROS')); // AGUA | ENERGIA | OTROS
+    $conceptoDet      = trim($_POST['concepto_detalle'] ?? '');          // opcional
+    $monto            = (float)($_POST['monto']  ?? 0);
+    $fecha_gen        = $_POST['fecha_generacion']   ?? date('Y-m-d');
+    $fecha_venc       = $_POST['fecha_vencimiento']  ?? date('Y-m-d');
+
+    if ($iduser <= 0 || $id_unidad <= 0 || $monto <= 0) {
+      json_out(false, 'Datos inválidos (usuario, unidad y monto son obligatorios).');
+    }
+    if (!in_array($conceptoCat, ['AGUA','ENERGIA','OTROS'], true)) {
+      $conceptoCat = 'OTROS';
     }
 
-    // Inserta y devuelve id_reserva
-    $sql = "INSERT INTO reserva (id_area, id_usuario, fecha_inicio, fecha_fin, estado, nota)
-            VALUES (:a,:u,:i,:f,'PENDIENTE',:n)
-            RETURNING id_reserva";
+    // Construir concepto final (prefijo categoría + detalle opcional)
+    $conceptoFinal = $conceptoCat;
+    if ($conceptoDet !== '') {
+      $conceptoFinal .= ': ' . $conceptoDet;
+    }
+
+    try {
+      $sql = "INSERT INTO cuota_mantenimiento (id_unidad, monto, fecha_generacion, fecha_vencimiento, estado, concepto)
+              VALUES (:u, :m, :fg, :fv, 'PENDIENTE', :c)";
+      $ok = $conexion->prepare($sql)->execute([
+        ':u'=>$id_unidad, ':m'=>$monto, ':fg'=>$fecha_gen, ':fv'=>$fecha_venc, ':c'=>$conceptoFinal
+      ]);
+      if (!$ok) throw new Exception('No se pudo crear la cuota.');
+      audit($conexion, $adminId, "Creó cuota PENDIENTE (concepto={$conceptoFinal}) para user #$iduser unidad #$id_unidad por Bs $monto");
+      json_out(true, 'Cuota creada correctamente.');
+    } catch (\Throwable $e) {
+      json_out(false, 'Error: '.$e->getMessage());
+    }
+  }
+
+  // ---- Registrar pago (marcar cuota como PAGADO y crear registro pago) ----
+  if ($action === 'pay_quota') {
+    $id_cuota = (int)($_POST['id_cuota'] ?? 0);
+    if ($id_cuota <= 0) json_out(false, 'ID de cuota inválido.');
+
+    // Cargar cuota + usuario (por unidad)
+    $sql = "SELECT c.id_cuota, c.id_unidad, c.monto, c.fecha_vencimiento, c.estado, c.concepto,
+                   ru.id_usuario
+            FROM cuota_mantenimiento c
+            JOIN residente_unidad ru ON ru.id_unidad = c.id_unidad
+            WHERE c.id_cuota = :id
+            LIMIT 1";
     $st = $conexion->prepare($sql);
-    $st->execute([':a'=>$id_area, ':u'=>$id_usuario, ':i'=>$inicio, ':f'=>$fin, ':n'=>$nota]);
-    $idNew = (int)$st->fetchColumn();
+    $st->execute([':id'=>$id_cuota]);
+    $cuota = $st->fetch(PDO::FETCH_ASSOC);
 
-    // (opcional) auditoría
+    if (!$cuota) json_out(false, 'Cuota no encontrada.');
+    if (strtoupper($cuota['estado']) !== 'PENDIENTE') json_out(false, 'La cuota ya no está pendiente.');
+
+    $id_usuario = (int)$cuota['id_usuario'];
+    $monto      = (float)$cuota['monto'];
+    $concepto   = 'Pago de '.$cuota['concepto'].' (cuota #'.$id_cuota.')';
+
     try {
-      $conexion->prepare("INSERT INTO auditoria (id_usuario, accion, modulo, ip_origen)
-                          VALUES (:u,:acc,'Reservas',:ip)")
-               ->execute([
-                 ':u'=>$idAdmin,
-                 ':acc'=>"Creó reserva #$idNew para usuario $id_usuario",
-                 ':ip'=>$_SERVER['REMOTE_ADDR'] ?? 'cli'
-               ]);
-    } catch (\Throwable $e) { /* ignorar si no existe auditoría */ }
+      $conexion->beginTransaction();
 
-    header('Location: reservas.php?ok=1'); exit;
-  } else {
-    header('Location: reservas.php?err=datos'); exit;
-  }
-}
+      // 1) Marcar cuota como PAGADO
+      $conexion->prepare("UPDATE cuota_mantenimiento SET estado='PAGADO' WHERE id_cuota=:id")
+               ->execute([':id'=>$id_cuota]);
 
-// ===== CONFIRMAR (ADMIN) =====
-if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action'] ?? '')==='confirmar') {
-  $id = (int)($_POST['id_reserva'] ?? 0);
-  if ($id > 0) {
-    try {
+      // 2) Crear registro en pago (con registrado_por = admin)
       $conexion->prepare("
-        UPDATE reserva
-           SET estado='APROBADA', aprobado_por=:adm, fecha_aprobacion=NOW()
-         WHERE id_reserva=:id
-      ")->execute([':adm'=>$idAdmin, ':id'=>$id]);
+        INSERT INTO pago (id_usuario, monto, fecha_pago, concepto, estado, registrado_por)
+        VALUES (:u, :m, CURRENT_DATE, :c, 'PAGADO', :adm)
+      ")->execute([
+        ':u'=>$id_usuario, ':m'=>$monto, ':c'=>$concepto, ':adm'=>$adminId
+      ]);
+
+      $id_pago = (int)$conexion->query("SELECT LASTVAL()")->fetchColumn();
+
+      $conexion->commit();
+
+      audit($conexion, $adminId, "Registró pago id_pago=$id_pago por cuota id_cuota=$id_cuota, Bs $monto");
+
+      // 3) Enviar recibo (HTML) por correo
+      send_receipt_email($conexion, $id_pago);
+
+      json_out(true, 'Pago registrado y recibo enviado.');
     } catch (\Throwable $e) {
-      // fallback si no existen columnas
-      $conexion->prepare("UPDATE reserva SET estado='APROBADA' WHERE id_reserva=:id")
-               ->execute([':id'=>$id]);
+      if ($conexion->inTransaction()) $conexion->rollBack();
+      json_out(false, 'Error: '.$e->getMessage());
     }
   }
-  header('Location: reservas.php'); exit;
+
+  json_out(false, 'Acción inválida.');
 }
 
-// ===== CANCELAR (ADMIN) =====
-if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action'] ?? '')==='cancelar') {
-  $id = (int)($_POST['id_reserva'] ?? 0);
-  $motivo = trim($_POST['motivo_cancelacion'] ?? '');
-  if ($id > 0) {
-    try {
-      $conexion->prepare("
-        UPDATE reserva
-           SET estado='CANCELADA',
-               cancelado_por=:adm,
-               fecha_cancelacion=NOW(),
-               motivo_cancelacion=:mot
-         WHERE id_reserva=:id
-      ")->execute([':adm'=>$idAdmin, ':mot'=>$motivo, ':id'=>$id]);
-    } catch (\Throwable $e) {
-      $conexion->prepare("UPDATE reserva SET estado='CANCELADA' WHERE id_reserva=:id")
-               ->execute([':id'=>$id]);
-    }
-  }
-  header('Location: reservas.php'); exit;
+// ====== Filtros ======
+$q        = trim($_GET['q'] ?? '');
+$desde    = $_GET['desde'] ?? '';
+$hasta    = $_GET['hasta'] ?? '';
+$estado   = strtoupper(trim($_GET['estado'] ?? 'PENDIENTE')); // PENDIENTE|TODOS
+$fconcept = strtoupper(trim($_GET['concepto'] ?? 'TODOS'));   // AGUA|ENERGIA|OTROS|TODOS
+
+$where = [];
+$params = [];
+
+if ($estado !== 'TODOS') {
+  $where[] = "UPPER(c.estado) = 'PENDIENTE'";
 }
+if ($fconcept !== 'TODOS') {
+  // Soportar prefijo (AGUA, ENERGIA, OTROS: algo)
+  $where[] = "UPPER(c.concepto) LIKE :cn";
+  $params[':cn'] = $fconcept.'%';
+}
+if ($q !== '') {
+  $where[] = "(LOWER(u.nombre) LIKE :q OR LOWER(u.apellido) LIKE :q OR LOWER(u.correo) LIKE :q OR LOWER(un.nro_unidad) LIKE :q OR LOWER(c.concepto) LIKE :q)";
+  $params[':q'] = '%'.strtolower($q).'%';
+}
+if ($desde !== '') {
+  $where[] = "c.fecha_vencimiento >= :desde";
+  $params[':desde'] = $desde;
+}
+if ($hasta !== '') {
+  $where[] = "c.fecha_vencimiento <= :hasta";
+  $params[':hasta'] = $hasta;
+}
+$whereSQL = $where ? ('WHERE '.implode(' AND ', $where)) : '';
 
-// ===== LISTA RESERVAS (incluye estado_pago si existe) =====
-try {
-$sqlLista = "
-  SELECT r.id_reserva,
-         a.nombre_area,
-         (u.nombre||' '||u.apellido) AS usuario,
-         r.fecha_inicio, r.fecha_fin, r.estado, r.nota,
-
-         -- 👇 AGREGAR AQUÍ
-         COALESCE((
-           SELECT CASE WHEN COUNT(1)>0 THEN 'PAGADO' ELSE 'PENDIENTE' END
-           FROM pago p
-           WHERE p.id_usuario = r.id_usuario
-             AND p.estado = 'Pagado'
-             AND p.concepto ILIKE ('Reserva #'||r.id_reserva||'%')
-         ), 'PENDIENTE') AS estado_pago,
-
-         ua.nombre||' '||ua.apellido AS admin_aprobo,
-         uc.nombre||' '||uc.apellido AS admin_cancelo,
-         r.fecha_aprobacion, r.fecha_cancelacion, r.motivo_cancelacion
-    FROM reserva r
-    JOIN area_comun a ON a.id_area=r.id_area
-    JOIN usuario u    ON u.iduser=r.id_usuario
-LEFT JOIN usuario ua  ON ua.iduser=r.aprobado_por
-LEFT JOIN usuario uc  ON uc.iduser=r.cancelado_por
-ORDER BY r.fecha_inicio DESC
+// Consulta base (incluye “Registrado por” si ya fue pagado)
+$sqlList = "
+  SELECT 
+    c.id_cuota, c.monto, c.fecha_generacion, c.fecha_vencimiento, c.estado, c.concepto,
+    u.iduser, u.nombre, u.apellido, u.correo,
+    un.id_unidad, un.nro_unidad, b.nombre AS bloque, e.nombre AS edificio,
+    px.id_pago AS pago_id, px.registrado_por AS pago_admin_id, ua.nombre AS admin_nom, ua.apellido AS admin_ape
+  FROM cuota_mantenimiento c
+  JOIN unidad un    ON un.id_unidad = c.id_unidad
+  JOIN bloque b     ON b.id_bloque  = un.id_bloque
+  JOIN edificio e   ON e.id_edificio = b.id_edificio
+  JOIN residente_unidad ru ON ru.id_unidad = un.id_unidad
+  JOIN usuario u    ON u.iduser = ru.id_usuario
+  LEFT JOIN LATERAL (
+     SELECT p.id_pago, p.registrado_por
+       FROM pago p
+      WHERE p.id_usuario = ru.id_usuario
+        AND p.concepto = ('Pago de ' || c.concepto || ' (cuota #' || c.id_cuota || ')')
+        AND UPPER(p.estado)='PAGADO'
+      ORDER BY p.id_pago DESC
+      LIMIT 1
+  ) px ON true
+  LEFT JOIN usuario ua ON ua.iduser = px.registrado_por
+  $whereSQL
+  ORDER BY c.fecha_vencimiento ASC, c.id_cuota ASC
 ";
-  $reservas = $conexion->query($sqlLista)->fetchAll(PDO::FETCH_ASSOC);
-} catch (\Throwable $e) {
-  // versión mínima si no existen columnas nuevas
-  $sqlLista = "
-    SELECT r.id_reserva,
-           a.nombre_area,
-           (u.nombre||' '||u.apellido) AS usuario,
-           r.fecha_inicio, r.fecha_fin, r.estado, r.nota,
-           COALESCE(r.estado_pago,'PENDIENTE') AS estado_pago
-      FROM reserva r
-      JOIN area_comun a ON a.id_area=r.id_area
-      JOIN usuario u    ON u.iduser=r.id_usuario
-  ORDER BY r.fecha_inicio DESC";
-  $reservas = $conexion->query($sqlLista)->fetchAll(PDO::FETCH_ASSOC);
+$st = $conexion->prepare($sqlList);
+$st->execute($params);
+$rows = $st->fetchAll(PDO::FETCH_ASSOC);
+
+// ====== Export CSV / PDF ======
+if (isset($_GET['export']) && $_GET['export'] === 'csv') {
+  header('Content-Type: text/csv; charset=UTF-8');
+  header('Content-Disposition: attachment; filename="morosidad.csv"');
+  // BOM UTF-8
+  echo "\xEF\xBB\xBF";
+  $out = fopen('php://output', 'w');
+  fputcsv($out, ['CuotaID','Usuario','Correo','Unidad','Edificio','Bloque','Concepto','Monto','Vence','Estado','RegistradoPor'], ',');
+  foreach ($rows as $r) {
+    $adminLabel = (trim(($r['admin_nom']??'').($r['admin_ape']??''))!=='')
+      ? trim(($r['admin_nom']??'').' '.($r['admin_ape']??''))
+      : '';
+    fputcsv($out, [
+      $r['id_cuota'],
+      $r['nombre'].' '.$r['apellido'],
+      $r['correo'],
+      $r['nro_unidad'],
+      $r['edificio'],
+      $r['bloque'],
+      $r['concepto'],
+      number_format((float)$r['monto'],2,'.',''),
+      $r['fecha_vencimiento'],
+      $r['estado'],
+      $adminLabel
+    ], ',');
+  }
+  fclose($out);
+  exit;
 }
 
-// ===== COMBOS: ÁREAS y USUARIOS =====
-$areas = $conexion->query("
-  SELECT id_area, nombre_area
-    FROM area_comun
-   WHERE UPPER(estado)='DISPONIBLE'
-ORDER BY nombre_area")->fetchAll(PDO::FETCH_ASSOC);
+if (isset($_GET['export']) && $_GET['export'] === 'pdf') {
+  ?>
+  <!doctype html><html lang="es"><head>
+    <meta charset="utf-8"><title>Morosidad · iDomus</title>
+    <style>
+      body{font-family:Arial, sans-serif; padding:16px;}
+      h2{margin:0 0 10px;}
+      table{width:100%; border-collapse:collapse;}
+      th,td{border:1px solid #999; padding:6px; font-size:12px;}
+      th{background:#eee;}
+      .muted{color:#666; font-size:12px;}
+    </style>
+  </head><body>
+    <h2>Reporte de Morosidad</h2>
+    <div class="muted">Generado: <?= date('Y-m-d H:i') ?> · Filtros: 
+      <?= $q ? "q='$q' " : '' ?>
+      <?= $desde ? "desde=$desde " : '' ?>
+      <?= $hasta ? "hasta=$hasta " : '' ?>
+      estado=<?= $estado ?> · concepto=<?= $fconcept ?>
+    </div>
+    <br>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>Usuario</th><th>Correo</th><th>Unidad</th><th>Edificio</th><th>Bloque</th>
+          <th>Concepto</th><th>Monto (Bs)</th><th>Vence</th><th>Estado</th><th>Registrado por</th>
+        </tr>
+      </thead>
+      <tbody>
+        <?php foreach($rows as $r): ?>
+        <tr>
+          <td><?= (int)$r['id_cuota'] ?></td>
+          <td><?= htmlspecialchars($r['nombre'].' '.$r['apellido']) ?></td>
+          <td><?= htmlspecialchars($r['correo']) ?></td>
+          <td><?= htmlspecialchars($r['nro_unidad']) ?></td>
+          <td><?= htmlspecialchars($r['edificio']) ?></td>
+          <td><?= htmlspecialchars($r['bloque']) ?></td>
+          <td><?= htmlspecialchars($r['concepto']) ?></td>
+          <td style="text-align:right;"><?= number_format((float)$r['monto'],2) ?></td>
+          <td><?= htmlspecialchars($r['fecha_vencimiento']) ?></td>
+          <td><?= htmlspecialchars($r['estado']) ?></td>
+          <td><?= htmlspecialchars(trim(($r['admin_nom']??'').' '.($r['admin_ape']??''))) ?></td>
+        </tr>
+        <?php endforeach; ?>
+        <?php if (!$rows): ?>
+          <tr><td colspan="11" style="text-align:center;color:#666;">Sin datos</td></tr>
+        <?php endif; ?>
+      </tbody>
+    </table>
+    <script>window.print()</script>
+  </body></html>
+  <?php
+  exit;
+}
 
-$usuarios = $conexion->query("
-  SELECT iduser, (nombre||' '||apellido) AS nombre
-    FROM usuario
-ORDER BY nombre")->fetchAll(PDO::FETCH_ASSOC);
+// ====== Datos para UI ======
+$nombreAdmin = $_SESSION['nombre'] ?? 'Admin';
+$rolAdmin    = $_SESSION['rol'] ?? 'admin';
 
-// ===== EVENTOS CALENDARIO (APROBADAS) =====
-$rowsCal = $conexion->query("
-  SELECT r.id_reserva, a.nombre_area,
-         (u.nombre||' '||u.apellido) AS usuario,
-         r.fecha_inicio, r.fecha_fin
-    FROM reserva r
-    JOIN area_comun a ON a.id_area=r.id_area
-    JOIN usuario u    ON u.iduser=r.id_usuario
-   WHERE r.estado='APROBADA'
-ORDER BY r.fecha_inicio")->fetchAll(PDO::FETCH_ASSOC);
+// Lista de usuarios (para el modal)
+$usuariosList = $conexion->query("
+  SELECT iduser, CONCAT(nombre,' ',apellido) AS nom, correo
+  FROM usuario
+  ORDER BY nom ASC
+")->fetchAll(PDO::FETCH_ASSOC);
 
-$palette = ['#1BAAA6','#0F3557','#4D4D4D','#333333','#19B9A2','#124870'];
-$events = [];
-foreach($rowsCal as $ev){
-  $ix = crc32((string)$ev['nombre_area']) % count($palette);
-  $color = $palette[$ix];
-  $events[] = [
-    'id'    => (int)$ev['id_reserva'],
-    'title' => $ev['nombre_area'].' · '.$ev['usuario'],
-    'start' => date('c', strtotime($ev['fecha_inicio'])),
-    'end'   => date('c', strtotime($ev['fecha_fin'])),
-    'backgroundColor' => $color,
-    'borderColor'     => $color,
-    'textColor'       => '#fff'
+// Mapa de unidades por usuario (para poblar select dinámico)
+$unitsByUser = [];
+$qr = $conexion->query("
+  SELECT ru.id_usuario, un.id_unidad, un.nro_unidad, b.nombre AS bloque, e.nombre AS edificio
+  FROM residente_unidad ru
+  JOIN unidad un ON un.id_unidad = ru.id_unidad
+  JOIN bloque b ON b.id_bloque = un.id_bloque
+  JOIN edificio e ON e.id_edificio = b.id_edificio
+  ORDER BY ru.id_usuario, e.nombre, b.nombre, un.nro_unidad
+");
+while ($x = $qr->fetch(PDO::FETCH_ASSOC)) {
+  $uid = (int)$x['id_usuario'];
+  $unitsByUser[$uid][] = [
+    'id_unidad'=>(int)$x['id_unidad'],
+    'label'=>$x['edificio'].' · '.$x['bloque'].' · '.$x['nro_unidad']
   ];
 }
+
 ?>
-<!DOCTYPE html>
+<!doctype html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8">
-  <title>Reservas · iDomus (Admin)</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-  <link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/main.min.css" rel="stylesheet">
+  <meta charset="utf-8">
+  <title>iDomus · Morosidad</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet"/>
   <style>
-    :root{ --primary:#0F3557; --secondary:#1BAAA6; --tertiary:#4D4D4D; --text:#333333; }
-    body{ background:#f7fafd; font-family:'Segoe UI',Arial,sans-serif; color:var(--text);}
-    .navbar{ background:var(--primary); }
-    .btn-domus{ background:var(--primary); color:#fff; border:none; }
-    .btn-domus:hover{ background:var(--secondary); }
-    table thead th{ background:var(--secondary); color:#fff; }
-    .small-muted{ font-size:.85rem; color:#6b7a8a; }
+    :root{ --accent:#1BAAA6; --dark:#0F3557; }
+    body{ background:#f7fafd; font-family:'Segoe UI', Arial, sans-serif; }
+    .navbar{ background:#023047; }
+    .brand-badge{ color:#fff; font-weight:700; }
+    .container-xxl{ max-width:1200px; }
+    .card-box{ border:none; border-radius:16px; box-shadow:0 6px 24px rgba(0,0,0,.08); }
+    .btn-domus{ background:var(--dark); color:#fff; border:none; border-radius:10px; }
+    .btn-domus:hover{ background:var(--accent); }
+    .badge-chip{ background:#e9f7f6; color:#0F3557; border-radius:20px; padding:.25rem .6rem; font-weight:600; }
+    .qr-box{width:220px;height:220px;border:2px dashed #1BAAA6;border-radius:12px;background:#e9f7f6;padding:8px;display:flex;align-items:center;justify-content:center;}
 
-    /* FullCalendar */
-    .fc .fc-col-header-cell-cushion,
-    .fc .fc-daygrid-day-number{ color:#000 !important; font-weight:600; }
-    .fc .fc-toolbar-title{ color:var(--primary); }
-    .fc .fc-button-primary{ background:var(--primary); border:none; }
-    .fc .fc-button-primary:hover{ background:var(--secondary); }
-    .fc .fc-daygrid-event{ border-radius:8px; font-weight:600; }
+    /* ==== Corrección de scroll horizontal y mobile ==== */
+    .table-wrap{ overflow-x: visible; } /* reemplaza a .table-responsive */
+    .table th, .table td{ white-space: normal; word-break: break-word; }
 
-    .user-chip{
-      background:#e9f7f6; 
-      color:#0F3557; 
-      border-radius:20px; 
-      padding:.35rem .6rem; 
-      font-weight:600; 
-      display:inline-flex; 
-      gap:.4rem; 
-      align-items:center; 
+    @media (max-width: 576px){
+      .th-email,.td-email,
+      .th-edificio,.td-edificio,
+      .th-bloque,.td-bloque,
+      .th-vence,.td-vence,
+      .th-registrado,.td-registrado{
+        display:none !important;
+      }
+      .table thead th, .table tbody td{
+        padding:.35rem .45rem;
+        font-size:.82rem;
+      }
+      .btn{ padding:.25rem .5rem; font-size:.78rem; }
     }
-    .user-chip i{ color:#1BAAA6; }
-    .user-chip-sm{
-      background:#e9f7f6;
-      color:#0F3557;
-      border-radius:18px;
-      padding:.25rem .45rem;
-      font-weight:600;
-      display:inline-flex;
-      gap:.35rem;
-      align-items:center;
-      font-size:.9rem;
-    }
-    .user-chip-sm i{ color:#1BAAA6; }
   </style>
 </head>
 <body>
-<nav class="navbar navbar-dark px-3">
-  <div class="container-fluid d-flex align-items-center">
-    <!-- Izquierda -->
-    <a class="navbar-brand text-white" href="dashboard.php">
-      <i class="bi bi-arrow-left-circle"></i> Volver
-    </a>
-
-    <!-- Derecha -->
-    <div class="ms-auto d-flex align-items-center gap-3">
-      <!-- Título -->
-      <span class="text-white fw-bold">Gestión de Reservas (Admin)</span>
-
-      <!-- Desktop (≥576px): nombre + rol -->
-      <span class="user-chip d-none d-sm-inline-flex">
-        <i class="bi bi-person-circle"></i>
-        <?= htmlspecialchars($nombre) ?> · <?= htmlspecialchars(ucfirst($rol)) ?>
+<!-- Navbar -->
+<nav class="navbar navbar-dark sticky-top shadow-sm mb-3">
+  <div class="container-fluid">
+    <a href="dashboard.php" class="btn btn-outline-light me-2"><i class="bi bi-arrow-left"></i> Volver</a>
+    <span class="brand-badge">iDomus · Morosidad</span>
+    <div class="d-flex align-items-center gap-2">
+      <span class="badge-chip d-none d-sm-inline-flex align-items-center gap-1">
+        <i class="bi bi-person-circle" style="color:#1BAAA6"></i>
+        <?= htmlspecialchars($nombreAdmin) ?> · <?= htmlspecialchars(ucfirst($rolAdmin)) ?>
       </span>
-
-      <!-- Móvil (<576px): versión compacta -->
-      <span class="user-chip-sm d-inline-flex d-sm-none">
-        <i class="bi bi-person-circle"></i>
-        <?= htmlspecialchars(ucfirst($rol)) ?>
-      </span>
+      <a href="../login/login.php?logout=1" class="btn btn-sm btn-outline-light">
+        <i class="bi bi-box-arrow-right"></i> Salir
+      </a>
     </div>
   </div>
 </nav>
 
-<div class="container my-4">
-  <?php if (isset($_GET['ok'])): ?>
-    <div class="alert alert-success">✅ Reserva registrada correctamente.</div>
-  <?php endif; ?>
-  <?php if (isset($_GET['err']) && $_GET['err']==='solapamiento'): ?>
-    <div class="alert alert-warning">⚠ El rango seleccionado se solapa con otra reserva PENDIENTE/APROBADA para esa área.</div>
-  <?php elseif(isset($_GET['err'])): ?>
-    <div class="alert alert-danger">❌ Datos incompletos.</div>
-  <?php endif; ?>
-
-  <div class="d-flex justify-content-between align-items-center mb-3">
-    <h4 class="mb-0">Reservas registradas</h4>
-    <button class="btn btn-domus" data-bs-toggle="modal" data-bs-target="#modalNueva">+ Nueva reserva</button>
+<div class="container-xxl">
+  <!-- Filtros -->
+  <div class="card card-box p-3 mb-3">
+    <form class="row g-2 align-items-end" method="get">
+      <div class="col-12 col-md-3">
+        <label class="form-label">Buscar (usuario/correo/unidad/concepto)</label>
+        <input type="text" name="q" class="form-control" value="<?= htmlspecialchars($q) ?>" placeholder="Ej. Juan, A-101, vidrio roto">
+      </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label">Desde (venc.)</label>
+        <input type="date" name="desde" class="form-control" value="<?= htmlspecialchars($desde) ?>">
+      </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label">Hasta (venc.)</label>
+        <input type="date" name="hasta" class="form-control" value="<?= htmlspecialchars($hasta) ?>">
+      </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label">Estado</label>
+        <select name="estado" class="form-select">
+          <option value="PENDIENTE" <?= $estado==='PENDIENTE'?'selected':'' ?>>Pendiente</option>
+          <option value="TODOS"     <?= $estado==='TODOS'?'selected':'' ?>>Todos</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label">Concepto (agrupado)</label>
+        <select name="concepto" class="form-select">
+          <option value="TODOS"   <?= $fconcept==='TODOS'?'selected':'' ?>>Todos</option>
+          <option value="AGUA"    <?= $fconcept==='AGUA'?'selected':'' ?>>Agua</option>
+          <option value="ENERGIA" <?= $fconcept==='ENERGIA'?'selected':'' ?>>Energía</option>
+          <option value="OTROS"   <?= $fconcept==='OTROS'?'selected':'' ?>>Otros / Libre</option>
+        </select>
+      </div>
+      <div class="col-12 col-md-1">
+        <button class="btn btn-domus w-100"><i class="bi bi-filter"></i></button>
+      </div>
+    </form>
   </div>
-
-  <div class="table-responsive shadow-sm mb-4">
-    <table class="table table-bordered table-striped align-middle">
-      <thead>
-        <tr>
-          <th>#</th>
-          <th>Área común</th>
-          <th>Usuario</th>
-          <th>Inicio</th>
-          <th>Fin</th>
-          <th>Estado</th>
-          <th>Pago</th>
-          <th>Acción</th>
-        </tr>
-      </thead>
-      <tbody>
-      <?php foreach($reservas as $i=>$r):
-        $estado = strtoupper(trim($r['estado'] ?? ''));
-        $badge  = estado_badge($estado);
-      ?>
-<!-- ====== INICIO BLOQUE FILA (REEMPLAZAR SOLO EL <tr>...</tr>) ====== -->
-<tr>
-  <td><?= $i+1 ?></td>
-  <td><?= htmlspecialchars($r['nombre_area'] ?? '') ?></td>
-  <td><?= htmlspecialchars($r['usuario'] ?? '') ?></td>
-  <td><?= !empty($r['fecha_inicio'])? date('d/m/Y H:i',strtotime($r['fecha_inicio'])):'—' ?></td>
-  <td><?= !empty($r['fecha_fin'])? date('d/m/Y H:i',strtotime($r['fecha_fin'])):'—' ?></td>
-
-  <!-- Estado general -->
-  <td>
-    <?php
-      $estado = strtoupper(trim($r['estado'] ?? ''));
-      $badge  = estado_badge($estado);
-    ?>
-    <span class="badge <?= $badge ?>"><?= htmlspecialchars($estado) ?></span>
-  </td>
-
-  <!-- Estado de pago + botón Link -->
-  <td>
-    <?php
-      // Opción 2: si el SQL no trae estado_pago, asumimos PENDIENTE.
-      $sp = strtoupper($r['estado_pago'] ?? 'PENDIENTE');
-      $badgep = ($sp==='PAGADO' ? 'bg-success' : ($sp==='PENDIENTE' ? 'bg-warning text-dark' : 'bg-secondary'));
-    ?>
-    <span class="badge <?= $badgep ?>"><?= htmlspecialchars($sp) ?></span>
-
-    <?php if (($estado==='APROBADA') && ($sp!=='PAGADO')): ?>
-      <button class="btn btn-sm btn-outline-primary ms-2"
-              onclick="generarLinkPago(<?= (int)$r['id_reserva'] ?>)">
-        <i class="bi bi-link-45deg"></i> Link
-      </button>
-    <?php endif; ?>
-  </td>
 
   <!-- Acciones -->
-  <td>
-    <?php if ($estado==='PENDIENTE'): ?>
-      <form method="post" class="d-inline">
-        <input type="hidden" name="action" value="confirmar">
-        <input type="hidden" name="id_reserva" value="<?= (int)$r['id_reserva'] ?>">
-        <button class="btn btn-sm btn-outline-success">
-          <i class="bi bi-check2-circle"></i> Confirmar
-        </button>
-      </form>
-
-      <button class="btn btn-sm btn-outline-danger"
-              data-bs-toggle="modal"
-              data-bs-target="#modalCancelar"
-              data-id="<?= (int)$r['id_reserva'] ?>">
-        <i class="bi bi-x-circle"></i> Cancelar
+  <div class="card card-box p-3 mb-3">
+    <div class="d-flex flex-wrap gap-2">
+      <button class="btn btn-domus" data-bs-toggle="modal" data-bs-target="#modalAddQuota">
+        <i class="bi bi-plus-circle"></i> Agregar cuota por pagar
       </button>
-
-    <?php elseif ($estado==='APROBADA'): ?>
-      <div class="small-muted">
-        <i class="bi bi-person-check"></i>
-        Aprobada por: <b><?= htmlspecialchars($r['admin_aprobo'] ?? '—') ?></b><br>
-        <i class="bi bi-clock"></i>
-        <?= !empty($r['fecha_aprobacion'])? date('d/m/Y H:i',strtotime($r['fecha_aprobacion'])): '—' ?>
-      </div>
-
-    <?php elseif ($estado==='CANCELADA'): ?>
-      <div class="small-muted">
-        <i class="bi bi-person-x"></i>
-        Cancelada por: <b><?= htmlspecialchars($r['admin_cancelo'] ?? '—') ?></b><br>
-        <i class="bi bi-clock"></i>
-        <?= !empty($r['fecha_cancelacion'])? date('d/m/Y H:i',strtotime($r['fecha_cancelacion'])): '—' ?><br>
-        <?php if(!empty($r['motivo_cancelacion'])): ?>
-          <i class="bi bi-chat-left-text"></i>
-          Motivo: <em><?= htmlspecialchars($r['motivo_cancelacion']) ?></em>
-        <?php endif; ?>
-      </div>
-    <?php endif; ?>
-  </td>
-</tr>
-<!-- ====== FIN BLOQUE FILA ====== -->
-      <?php endforeach; ?>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- Calendario -->
-  <div class="card p-3 shadow-sm">
-    <div class="d-flex justify-content-between align-items-center mb-2">
-      <h5 class="mb-0"><i class="bi bi-calendar-event"></i> Calendario de Reservas (APROBADAS)</h5>
+      <a class="btn btn-outline-success ms-auto" href="?<?= http_build_query(array_merge($_GET,['export'=>'csv'])) ?>">
+        <i class="bi bi-file-earmark-spreadsheet"></i> Excel (CSV)
+      </a>
+      <a class="btn btn-outline-danger" href="?<?= http_build_query(array_merge($_GET,['export'=>'pdf'])) ?>" target="_blank">
+        <i class="bi bi-filetype-pdf"></i> PDF
+      </a>
     </div>
-    <div id="calendar"></div>
   </div>
-</div>
 
-<!-- Modal Nueva reserva -->
-<div class="modal fade" id="modalNueva" tabindex="-1">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <form method="post" action="">
-        <input type="hidden" name="action" value="crear">
-        <div class="modal-header">
-          <h5 class="modal-title">Nueva reserva</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-        </div>
-        <div class="modal-body">
-          <div class="mb-3">
-            <label class="form-label">Área común</label>
-            <select class="form-select" name="id_area" required>
-              <option value="">Seleccione…</option>
-              <?php foreach($areas as $a): ?>
-                <option value="<?= (int)$a['id_area'] ?>"><?= htmlspecialchars($a['nombre_area']) ?></option>
-              <?php endforeach; ?>
-            </select>
-          </div>
-          <div class="mb-3">
-            <label class="form-label">Usuario solicitante</label>
-            <select class="form-select" name="id_usuario" required>
-              <option value="">Seleccione…</option>
-              <?php foreach($usuarios as $u): ?>
-                <option value="<?= (int)$u['iduser'] ?>"><?= htmlspecialchars($u['nombre']) ?></option>
-              <?php endforeach; ?>
-            </select>
-          </div>
-          <div class="row g-2">
-            <div class="col-12 col-md-6">
-              <label class="form-label">Fecha inicio</label>
-              <input type="datetime-local" name="fecha_inicio" class="form-control" required>
-            </div>
-            <div class="col-12 col-md-6">
-              <label class="form-label">Fecha fin</label>
-              <input type="datetime-local" name="fecha_fin" class="form-control" required>
-            </div>
-          </div>
-          <div class="mt-3">
-            <label class="form-label">Nota / descripción</label>
-            <textarea name="nota" class="form-control" rows="2" placeholder="Ej. Reunión vecinal…"></textarea>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cerrar</button>
-          <button type="submit" class="btn btn-domus">Guardar</button>
-        </div>
-      </form>
+  <!-- Tabla -->
+  <div class="card card-box p-3">
+    <div class="table-wrap">
+      <table class="table table-hover align-middle">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Usuario</th>
+            <th class="th-email">Correo</th>
+            <th>Unidad</th>
+            <th class="th-edificio">Edificio</th>
+            <th class="th-bloque">Bloque</th>
+            <th>Concepto</th>
+            <th class="text-end">Monto (Bs)</th>
+            <th class="th-vence">Vence</th>
+            <th>Estado</th>
+            <th class="th-registrado">Registrado por</th>
+            <th style="width:200px;">Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          <?php foreach($rows as $r): ?>
+          <tr data-id="<?= (int)$r['id_cuota'] ?>">
+            <td><?= (int)$r['id_cuota'] ?></td>
+            <td><?= htmlspecialchars($r['nombre'].' '.$r['apellido']) ?></td>
+            <td class="td-email"><?= htmlspecialchars($r['correo']) ?></td>
+            <td><?= htmlspecialchars($r['nro_unidad']) ?></td>
+            <td class="td-edificio"><?= htmlspecialchars($r['edificio']) ?></td>
+            <td class="td-bloque"><?= htmlspecialchars($r['bloque']) ?></td>
+            <td>
+              <?php
+                $tag = 'secondary';
+                $uc = strtoupper($r['concepto']);
+                if (str_starts_with($uc,'AGUA'))    $tag='info';
+                if (str_starts_with($uc,'ENERGIA')) $tag='warning';
+              ?>
+              <span class="badge bg-<?= $tag ?>"><?= htmlspecialchars($r['concepto']) ?></span>
+            </td>
+            <td class="text-end"><?= number_format((float)$r['monto'],2) ?></td>
+            <td class="td-vence"><?= htmlspecialchars($r['fecha_vencimiento']) ?></td>
+            <td>
+              <?php if (strtoupper($r['estado'])==='PENDIENTE'): ?>
+                <span class="badge bg-warning text-dark">Pendiente</span>
+              <?php else: ?>
+                <span class="badge bg-success">Pagado</span>
+              <?php endif; ?>
+            </td>
+            <td class="td-registrado">
+              <?php
+                $adm = trim(($r['admin_nom']??'').' '.($r['admin_ape']??''));
+                echo $adm ? htmlspecialchars($adm) : '—';
+              ?>
+            </td>
+            <td>
+              <?php if (strtoupper($r['estado'])==='PENDIENTE'): ?>
+                <button class="btn btn-sm btn-outline-primary btn-pay"
+                        data-id="<?= (int)$r['id_cuota'] ?>"
+                        data-user="<?= htmlspecialchars($r['nombre'].' '.$r['apellido']) ?>"
+                        data-unidad="<?= htmlspecialchars($r['nro_unidad']) ?>"
+                        data-concepto="<?= htmlspecialchars($r['concepto']) ?>"
+                        data-vence="<?= htmlspecialchars($r['fecha_vencimiento']) ?>"
+                        data-monto="<?= number_format((float)$r['monto'],2,'.','') ?>"
+                        data-bs-toggle="modal" data-bs-target="#modalPay">
+                  <i class="bi bi-qr-code"></i> Pagar (QR)
+                </button>
+              <?php else: ?>
+                <span class="text-muted small">—</span>
+              <?php endif; ?>
+            </td>
+          </tr>
+          <?php endforeach; ?>
+          <?php if (!$rows): ?>
+            <tr><td colspan="12" class="text-center text-muted">No hay datos</td></tr>
+          <?php endif; ?>
+        </tbody>
+      </table>
     </div>
   </div>
 </div>
 
-<!-- Modal Cancelar (con motivo) -->
-<div class="modal fade" id="modalCancelar" tabindex="-1">
-  <div class="modal-dialog modal-dialog-centered">
-    <form class="modal-content" method="post" action="">
-      <input type="hidden" name="action" value="cancelar">
-      <input type="hidden" name="id_reserva" id="cancel_id" value="0">
+<!-- MODAL: Agregar cuota (select + detalle opcional) -->
+<div class="modal fade" id="modalAddQuota" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <form class="modal-content" id="formAddQuota">
       <div class="modal-header">
-        <h5 class="modal-title">Cancelar reserva</h5>
+        <h5 class="modal-title">Nueva cuota por pagar</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
-        <p>¿Desea cancelar esta reserva? (opcional) Indique el motivo:</p>
-        <textarea name="motivo_cancelacion" class="form-control" rows="3" placeholder="Motivo de cancelación"></textarea>
+        <div id="alertAdd" class="alert d-none"></div>
+        <input type="hidden" name="ajax" value="1">
+        <input type="hidden" name="action" value="add_quota">
+
+        <div class="mb-2">
+          <label class="form-label">Usuario</label>
+          <select class="form-select" name="iduser" id="aq_user" required>
+            <option value="">Selecciona...</option>
+            <?php foreach($usuariosList as $u): ?>
+              <option value="<?= (int)$u['iduser'] ?>">
+                <?= htmlspecialchars($u['nom']) ?> (<?= htmlspecialchars($u['correo']) ?>)
+              </option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+
+        <div class="mb-2">
+          <label class="form-label">Unidad</label>
+          <select class="form-select" name="id_unidad" id="aq_unidad" required>
+            <option value="">Selecciona un usuario...</option>
+          </select>
+          <div class="form-text">Un usuario puede tener varias unidades. Selecciona a cuál aplicar.</div>
+        </div>
+
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label">Concepto (agrupado)</label>
+            <select class="form-select" name="concepto" required>
+              <option value="AGUA">Agua</option>
+              <option value="ENERGIA">Energía</option>
+              <option value="OTROS" selected>Otros</option>
+            </select>
+          </div>
+          <div class="col-6">
+            <label class="form-label">Monto (Bs)</label>
+            <input type="number" step="0.01" min="0.1" class="form-control" name="monto" required>
+          </div>
+        </div>
+
+        <!-- Detalle/observación opcional que se concatena al concepto -->
+        <div class="mt-2">
+          <label class="form-label">Detalle / Observación (opcional)</label>
+          <input type="text" class="form-control" name="concepto_detalle" placeholder="Ej. vidrio roto, control remoto perdido…">
+          <div class="form-text">Si lo completas, se grabará como “AGUA: detalle”, “ENERGIA: detalle” o “OTROS: detalle”.</div>
+        </div>
+
+        <div class="row mt-2 g-2">
+          <div class="col">
+            <label class="form-label">Generación</label>
+            <input type="date" class="form-control" name="fecha_generacion" value="<?= date('Y-m-d') ?>">
+          </div>
+          <div class="col">
+            <label class="form-label">Vencimiento</label>
+            <input type="date" class="form-control" name="fecha_vencimiento" value="<?= date('Y-m-d', strtotime('+10 days')) ?>">
+          </div>
+        </div>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cerrar</button>
-        <button type="submit" class="btn btn-outline-danger">Cancelar reserva</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button class="btn btn-domus" type="submit">Crear</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- MODAL: Registrar pago con QR -->
+<div class="modal fade" id="modalPay" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <form class="modal-content" id="formPay">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-qr-code"></i> Registrar pago (QR)</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="alertPay" class="alert d-none"></div>
+        <input type="hidden" name="ajax" value="1">
+        <input type="hidden" name="action" value="pay_quota">
+        <input type="hidden" name="id_cuota" id="pay_id_cuota" value="0">
+
+        <div class="mb-2">
+          <label class="form-label">Usuario</label>
+          <input type="text" class="form-control" id="pay_user" disabled>
+        </div>
+
+        <div class="row g-2">
+          <div class="col-6">
+            <label class="form-label">Unidad</label>
+            <input type="text" class="form-control" id="pay_unidad" disabled>
+          </div>
+          <div class="col-6">
+            <label class="form-label">Vence</label>
+            <input type="text" class="form-control" id="pay_vence" disabled>
+          </div>
+        </div>
+
+        <div class="mb-2 mt-2">
+          <label class="form-label">Concepto</label>
+          <input type="text" class="form-control" id="pay_concepto" disabled>
+        </div>
+
+        <div class="mb-2">
+          <label class="form-label">Monto (Bs)</label>
+          <input type="text" class="form-control" id="pay_monto" disabled>
+        </div>
+
+        <div class="my-3 d-flex justify-content-center">
+          <div class="qr-box">
+            <img id="pay_qr" src="" alt="QR" style="width:100%;height:100%;object-fit:contain;">
+          </div>
+        </div>
+        <div class="small text-muted text-center">Escanee el QR con el celular o confirme con “Pagar ahora”.</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">Cerrar</button>
+        <button class="btn btn-domus" type="submit"><i class="bi bi-cash-coin"></i> Pagar ahora</button>
       </div>
     </form>
   </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
 <script>
-  // Pasa id al modal de cancelar
-  const modalCancelar = document.getElementById('modalCancelar');
-  if (modalCancelar) {
-    modalCancelar.addEventListener('show.bs.modal', ev=>{
-      const id = ev.relatedTarget?.getAttribute('data-id') || '0';
-      document.getElementById('cancel_id').value = id;
-    });
-  }
+// ====== Mapa de unidades por usuario (precargado desde PHP) ======
+const USER_UNITS = <?= json_encode($unitsByUser, JSON_UNESCAPED_UNICODE) ?>;
 
-  // FullCalendar
-  const events = <?= json_encode($events, JSON_UNESCAPED_UNICODE) ?>;
-  const cal = new FullCalendar.Calendar(document.getElementById('calendar'), {
-    initialView: 'dayGridMonth',
-    height: 'auto',
-    locale: 'es',
-    headerToolbar: { left:'prev,next today', center:'title', right:'dayGridMonth,timeGridWeek,timeGridDay' },
-    events,
-    eventTimeFormat: { hour: '2-digit', minute:'2-digit', hour12:false },
-    nowIndicator: true,
-    dayMaxEventRows: 3,
-    eventDisplay: 'block'
+// Poblado dinámico de unidades al elegir usuario
+const selUser  = document.getElementById('aq_user');
+const selUnit  = document.getElementById('aq_unidad');
+selUser?.addEventListener('change', ()=>{
+  const uid = parseInt(selUser.value || '0', 10);
+  selUnit.innerHTML = '';
+  if (!uid || !USER_UNITS[uid] || USER_UNITS[uid].length === 0) {
+    selUnit.innerHTML = '<option value="">Este usuario no tiene unidad asignada</option>';
+    return;
+  }
+  selUnit.innerHTML = '<option value="">Selecciona...</option>';
+  USER_UNITS[uid].forEach(u=>{
+    const opt = document.createElement('option');
+    opt.value = u.id_unidad;
+    opt.textContent = u.label;
+    selUnit.appendChild(opt);
   });
-  cal.render();
+});
 
-  // === Generar link/QR de pago (abre nueva pestaña) ===
-  async function crearPago(id){
-    const fd = new FormData();
-    fd.set('action','crear_pago_reserva');
-    fd.set('id_reserva', id);
+// ====== Modal: pagar (rellena datos + QR) ======
+document.querySelectorAll('.btn-pay').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    const id       = btn.getAttribute('data-id')||'0';
+    const user     = btn.getAttribute('data-user')||'—';
+    const unidad   = btn.getAttribute('data-unidad')||'—';
+    const vence    = btn.getAttribute('data-vence')||'—';
+    const monto    = btn.getAttribute('data-monto')||'0.00';
+    const concepto = btn.getAttribute('data-concepto')||'—';
 
-    // API de pagos (crearemos este archivo en el siguiente paso)
-    const res = await fetch('../pagos/pagos_api.php', { method:'POST', body: fd });
-    const js  = await res.json().catch(()=>({success:false,message:'JSON inválido'}));
+    document.getElementById('pay_id_cuota').value = id;
+    document.getElementById('pay_user').value     = user;
+    document.getElementById('pay_unidad').value   = unidad;
+    document.getElementById('pay_vence').value    = vence;
+    document.getElementById('pay_concepto').value = concepto;
+    document.getElementById('pay_monto').value    = parseFloat(monto).toFixed(2);
 
-    if (js.success && js.url) {
-      // ej: js.url = "pagar_reserva.php?token=XXXX"
-      window.open('../pagos/'+js.url, '_blank');
-    } else {
-      alert(js.message || 'No se pudo generar el link de pago.');
-    }
+    // Generar QR (informativo)
+    const data = encodeURIComponent(`iDomus|Cuota#${id}|Unidad:${unidad}|Concepto:${concepto}|Monto:Bs ${monto}|Vence:${vence}`);
+    const url  = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${data}`;
+    document.getElementById('pay_qr').src = url;
+
+    const a = document.getElementById('alertPay');
+    a.classList.add('d-none'); a.textContent='';
+  });
+});
+
+// ====== Submit: pagar (AJAX) ======
+document.getElementById('formPay').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const a = document.getElementById('alertPay');
+  const data = new FormData(e.target);
+  const res  = await fetch('morosidad.php', { method:'POST', body:data });
+  let js = {};
+  try{ js = await res.json(); }catch{ js = {success:false, message:'Respuesta inválida'} }
+  if (js.success) {
+    a.className = 'alert alert-success'; a.textContent = js.message || 'Pago registrado.';
+    a.classList.remove('d-none');
+    setTimeout(()=> location.reload(), 900);
+  } else {
+    a.className = 'alert alert-danger'; a.textContent = js.message || 'Error.';
+    a.classList.remove('d-none');
   }
-</script>
-<!-- ====== INICIO BLOQUE JS: Link de pago (mock) ====== -->
-<script>
-  // Genera un link de pago "didáctico" (simulado) y lo copia al portapapeles
-  function generarLinkPago(idReserva){
-    // Puedes cambiar esta ruta por donde pongamos el pago mock real
-    const url = `${location.origin}/iDomus/app/views/usuario/pago_demo.php?id_reserva=` + encodeURIComponent(idReserva);
+});
 
-    // Copiamos al portapapeles (si el navegador lo permite)
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(url).then(()=>{
-        alert('Link de pago copiado:\n' + url);
-      }).catch(()=>{
-        alert('Link de pago:\n' + url);
-      });
-    } else {
-      alert('Link de pago:\n' + url);
-    }
+// ====== Submit: agregar cuota ======
+document.getElementById('formAddQuota').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const a = document.getElementById('alertAdd');
+  const data = new FormData(e.target);
+  const res  = await fetch('morosidad.php', { method:'POST', body:data });
+  let js = {};
+  try{ js = await res.json(); }catch{ js = {success:false, message:'Respuesta inválida'} }
+  if (js.success) {
+    a.className = 'alert alert-success'; a.textContent = js.message || 'Cuota creada.';
+    a.classList.remove('d-none');
+    // Limpia y resetea para permitir nuevas cuotas seguidas
+    e.target.reset();
+    selUnit.innerHTML = '<option value="">Selecciona un usuario...</option>';
+    setTimeout(()=> location.reload(), 900);
+  } else {
+    a.className = 'alert alert-danger'; a.textContent = js.message || 'Error.';
+    a.classList.remove('d-none');
   }
+});
 </script>
-<!-- ====== FIN BLOQUE JS ====== -->
 </body>
 </html>
