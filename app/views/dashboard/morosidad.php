@@ -3,10 +3,9 @@
 session_start();
 require_once '../../models/conexion.php';
 
-// tasa de mora: ajustar según política (ej: 12% anual => 0.12)
+// tasa de mora
 $tasa_anual  = 0.12;
 $tasa_diaria = $tasa_anual / 365.0;
-
 
 // ====== Guardas: solo ADMIN ======
 if (empty($_SESSION['iduser']) || ($_SESSION['rol'] ?? '') !== 'admin') {
@@ -83,7 +82,7 @@ if (!function_exists('str_starts_with')) {
   }
 }
 
-// ====== AJAX: crear cuota / registrar pago / mora ======
+/* ====== AJAX: crear cuota / registrar pago / cálculos / recibo ====== */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax'])) {
   $action  = $_POST['action'] ?? '';
   $adminId = (int)($_SESSION['iduser'] ?? 0);
@@ -93,7 +92,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax'])) {
     $iduser           = (int)($_POST['iduser'] ?? 0);
     $id_unidad        = (int)($_POST['id_unidad'] ?? 0);
     $conceptoCat      = strtoupper(trim($_POST['concepto'] ?? 'OTROS')); // AGUA | ENERGIA | OTROS
-    $conceptoDet      = trim($_POST['concepto_detalle'] ?? '');          // opcional
+    $conceptoDet      = trim($_POST['concepto_detalle'] ?? '');
     $monto            = (float)($_POST['monto']  ?? 0);
     $fecha_gen        = $_POST['fecha_generacion']   ?? date('Y-m-d');
     $fecha_venc       = $_POST['fecha_vencimiento']  ?? date('Y-m-d');
@@ -105,8 +104,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax'])) {
       $conceptoCat = 'OTROS';
     }
 
-    $conceptoFinal = $conceptoCat;
-    if ($conceptoDet !== '') $conceptoFinal .= ': ' . $conceptoDet;
+    $conceptoFinal = $conceptoCat.($conceptoDet!==''? ': '.$conceptoDet : '');
 
     try {
       $sql = "INSERT INTO cuota_mantenimiento (id_unidad, monto, fecha_generacion, fecha_vencimiento, estado, concepto)
@@ -140,7 +138,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax'])) {
     if (!$cuota) json_out(false, 'Cuota no encontrada.');
     if (strtoupper($cuota['estado']) !== 'PENDIENTE') json_out(false, 'La cuota ya no está pendiente.');
 
-    // Recalcular mora al momento del pago (seguridad)
+    // Recalcular mora al momento del pago
     $monto_base = (float)$cuota['monto'];
     $hoy        = new DateTimeImmutable('now');
     $vence      = new DateTimeImmutable($cuota['fecha_vencimiento']);
@@ -162,6 +160,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax'])) {
                ->execute([':id'=>$id_cuota]);
 
       // 2) Crear registro en pago por el TOTAL (base + mora)
+      //    (sin columna 'medio' porque no existe en tu tabla)
       $conexion->prepare("
         INSERT INTO pago (id_usuario, monto, fecha_pago, concepto, estado, registrado_por)
         VALUES (:u, :m, CURRENT_DATE, :c, 'PAGADO', :adm)
@@ -183,7 +182,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax'])) {
     }
   }
 
-  // ---- Calcular mora en tiempo real (no guarda) ----
+  // ---- Calcular mora (no guarda) ----
   if ($action === 'calc_mora') {
     $id_cuota = (int)($_POST['id_cuota'] ?? 0);
     if ($id_cuota <= 0) json_out(false, 'ID de cuota inválido.');
@@ -211,37 +210,61 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax'])) {
     ]);
   }
 
-  // ---- Aplicar (guardar) mora calculada (solo registro histórico) ----
-  if ($action === 'apply_mora') {
+  // ---- Recibo (para modal): datos de cuota + pago PAGADO ----
+  if ($action === 'get_recibo') {
     $id_cuota = (int)($_POST['id_cuota'] ?? 0);
-    $dias     = (int)($_POST['dias_mora'] ?? 0);
-    $interes  = (float)($_POST['interes'] ?? 0);
-    $total    = (float)($_POST['total'] ?? 0);
     if ($id_cuota <= 0) json_out(false, 'ID de cuota inválido.');
 
-    try {
-      $conexion->beginTransaction();
-      $sql = "INSERT INTO mora_aplicada (id_cuota, dias_mora, interes, total, aplicado_por)
-              VALUES (:c, :d, :i, :t, :u)";
-      $ok = $conexion->prepare($sql)->execute([
-        ':c'=>$id_cuota, ':d'=>$dias, ':i'=>round($interes,2), ':t'=>round($total,2), ':u'=>$adminId
-      ]);
-      if (!$ok) throw new Exception('No se pudo registrar la mora.');
+    // Datos de cuota y usuario
+    $sql = "SELECT c.id_cuota, c.concepto, c.monto, c.fecha_vencimiento, c.estado,
+                   un.nro_unidad, b.nombre AS bloque, e.nombre AS edificio,
+                   ru.id_usuario, u.nombre, u.apellido, u.correo
+              FROM cuota_mantenimiento c
+              JOIN unidad un   ON un.id_unidad = c.id_unidad
+              JOIN bloque b    ON b.id_bloque  = un.id_bloque
+              JOIN edificio e  ON e.id_edificio = b.id_edificio
+              JOIN residente_unidad ru ON ru.id_unidad = un.id_unidad
+              JOIN usuario u   ON u.iduser = ru.id_usuario
+             WHERE c.id_cuota = :id
+             LIMIT 1";
+    $st = $conexion->prepare($sql);
+    $st->execute([':id'=>$id_cuota]);
+    $cuota = $st->fetch(PDO::FETCH_ASSOC);
+    if (!$cuota) json_out(false, 'No se encontró la cuota.');
 
-      audit($conexion, $adminId, "Aplicó mora a cuota_id=$id_cuota dias=$dias interes=".number_format($interes,2));
+    // Pago asociado
+    $conceptoPago = 'Pago de '.$cuota['concepto'].' (cuota #'.$id_cuota.')';
+    $stp = $conexion->prepare("
+      SELECT p.id_pago, p.monto, p.fecha_pago, p.estado
+        FROM pago p
+       WHERE p.id_usuario = :u
+         AND p.concepto = :c
+         AND UPPER(p.estado) = 'PAGADO'
+       ORDER BY p.id_pago DESC
+       LIMIT 1
+    ");
+    $stp->execute([':u'=>(int)$cuota['id_usuario'], ':c'=>$conceptoPago]);
+    $pago = $stp->fetch(PDO::FETCH_ASSOC);
+    if (!$pago) json_out(false, 'No se encontró un pago PAGADO para esta cuota.');
 
-      $conexion->commit();
-      json_out(true, 'Mora aplicada correctamente.');
-    } catch (\Throwable $e) {
-      if ($conexion->inTransaction()) $conexion->rollBack();
-      json_out(false, 'Error al aplicar mora: '.$e->getMessage());
-    }
+    $unidadLbl = trim(($cuota['edificio']??'').' · '.($cuota['bloque']??'').' · '.$cuota['nro_unidad']);
+    $residente = trim(($cuota['nombre']??'').' '.($cuota['apellido']??''));
+
+    json_out(true, 'Recibo listo.', [
+      'id_pago'     => (int)$pago['id_pago'],
+      'concepto'    => $cuota['concepto'],
+      'monto'       => number_format((float)$pago['monto'],2,'.',''),
+      'fecha_pago'  => (string)($pago['fecha_pago'] ?? date('Y-m-d')),
+      'unidad'      => $unidadLbl,
+      'residente'   => $residente,
+      'correo'      => (string)($cuota['correo'] ?? ''),
+    ]);
   }
 
   json_out(false, 'Acción inválida.');
 }
 
-// ====== Filtros ======
+/* ====== Filtros ====== */
 $q        = trim($_GET['q'] ?? '');
 $desde    = $_GET['desde'] ?? '';
 $hasta    = $_GET['hasta'] ?? '';
@@ -322,10 +345,8 @@ $rows = $st->fetchAll(PDO::FETCH_ASSOC);
     .btn-domus:hover{ background:var(--accent); }
     .badge-chip{ background:#e9f7f6; color:#0F3557; border-radius:20px; padding:.25rem .6rem; font-weight:600; }
     .qr-box{width:220px;height:220px;border:2px dashed #1BAAA6;border-radius:12px;background:#e9f7f6;padding:8px;display:flex;align-items:center;justify-content:center;}
-
     .table-wrap{ overflow-x: visible; }
     .table th, .table td{ white-space: normal; word-break: break-word; }
-
     @media (max-width: 576px){
       .th-email,.td-email,
       .th-edificio,.td-edificio,
@@ -334,13 +355,9 @@ $rows = $st->fetchAll(PDO::FETCH_ASSOC);
       .th-registrado,.td-registrado{
         display:none !important;
       }
-      .table thead th, .table tbody td{
-        padding:.35rem .45rem;
-        font-size:.82rem;
-      }
+      .table thead th, .table tbody td{ padding:.35rem .45rem; font-size:.82rem; }
       .btn{ padding:.25rem .5rem; font-size:.78rem; }
     }
-
     .base-amount { color: #0F3557; font-weight:600; display:block; }
     .mora-amount { color: #d9534f; font-weight:700; display:block; margin-top:4px; font-size:0.95rem; }
     .mora-small  { color:#8b0000; font-size:0.82rem; }
@@ -420,11 +437,15 @@ $rows = $st->fetchAll(PDO::FETCH_ASSOC);
             <th class="th-vence">Vence</th>
             <th>Estado</th>
             <th class="th-registrado">Registrado por</th>
-            <th style="width:200px;">Acciones</th>
+            <th style="width:220px;">Acciones</th>
           </tr>
         </thead>
         <tbody>
           <?php foreach($rows as $r): ?>
+          <?php
+            $estadoCuota = strtoupper(trim($r['estado'] ?? ''));
+            $esPendiente = ($estadoCuota === 'PENDIENTE');
+          ?>
           <tr data-id="<?= (int)$r['id_cuota'] ?>">
             <td><?= (int)$r['id_cuota'] ?></td>
             <td><?= htmlspecialchars($r['nombre'].' '.$r['apellido']) ?></td>
@@ -451,7 +472,7 @@ $rows = $st->fetchAll(PDO::FETCH_ASSOC);
                 try {
                   $hoy = new DateTimeImmutable('today');
                   $vence = new DateTimeImmutable($r['fecha_vencimiento']);
-                  if (strtoupper($r['estado']) === 'PENDIENTE' && $vence < $hoy) {
+                  if ($esPendiente && $vence < $hoy) {
                     $dias_mora = (int)$hoy->diff($vence)->days;
                     $interes = round($monto_base * ($tasa_diaria * $dias_mora), 2);
                     $total_con_mora = round($monto_base + $interes, 2);
@@ -469,7 +490,7 @@ $rows = $st->fetchAll(PDO::FETCH_ASSOC);
 
             <td class="td-vence"><?= htmlspecialchars($r['fecha_vencimiento']) ?></td>
             <td>
-              <?php if (strtoupper($r['estado'])==='PENDIENTE'): ?>
+              <?php if ($esPendiente): ?>
                 <span class="badge bg-warning text-dark">Pendiente</span>
               <?php else: ?>
                 <span class="badge bg-success">Pagado</span>
@@ -482,7 +503,7 @@ $rows = $st->fetchAll(PDO::FETCH_ASSOC);
               ?>
             </td>
             <td>
-              <?php if (strtoupper($r['estado'])==='PENDIENTE'): ?>
+              <?php if ($esPendiente): ?>
                 <button class="btn btn-sm btn-outline-primary btn-pay"
                         data-id="<?= (int)$r['id_cuota'] ?>"
                         data-user="<?= htmlspecialchars($r['nombre'].' '.$r['apellido']) ?>"
@@ -493,16 +514,14 @@ $rows = $st->fetchAll(PDO::FETCH_ASSOC);
                         data-bs-toggle="modal" data-bs-target="#modalPay">
                   <i class="bi bi-qr-code"></i> Pagar (QR)
                 </button>
-
-                <button class="btn btn-sm btn-outline-danger btn-mora"
+              <?php else: ?>
+                <button class="btn btn-sm btn-outline-success btn-recibo"
                         data-id="<?= (int)$r['id_cuota'] ?>"
                         data-user="<?= htmlspecialchars($r['nombre'].' '.$r['apellido']) ?>"
                         data-unidad="<?= htmlspecialchars($r['nro_unidad']) ?>"
-                        data-vence="<?= htmlspecialchars($r['fecha_vencimiento']) ?>">
-                  <i class="bi bi-exclamation-circle"></i> Generar Mora
+                        data-concepto="<?= htmlspecialchars($r['concepto']) ?>">
+                  <i class="bi bi-check2-circle"></i> Ver recibo
                 </button>
-              <?php else: ?>
-                <span class="text-muted small">—</span>
               <?php endif; ?>
             </td>
           </tr>
@@ -516,62 +535,31 @@ $rows = $st->fetchAll(PDO::FETCH_ASSOC);
   </div>
 </div>
 
-<!-- MODAL: Generar/Aplicar Mora -->
-<div class="modal fade" id="modalMora" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog">
-    <form class="modal-content" id="formMora">
-      <div class="modal-header">
-        <h5 class="modal-title"><i class="bi bi-exclamation-circle"></i> Generar Mora</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+<!-- MODAL: Recibo (simple) -->
+<div class="modal fade" id="modalRecibo" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header" style="background:#198754;color:#fff;">
+        <h5 class="modal-title"><i class="bi bi-receipt-cutoff"></i> Pago registrado</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
-        <input type="hidden" name="ajax" value="1">
-        <input type="hidden" name="action" value="apply_mora">
-        <input type="hidden" name="id_cuota" id="mora_id_cuota" value="0">
-        <div id="mora_alert" class="alert d-none"></div>
-
-        <div class="mb-2">
-          <label class="form-label">Usuario</label>
-          <input type="text" class="form-control" id="mora_user" disabled>
-        </div>
-        <div class="row g-2">
-          <div class="col-6">
-            <label class="form-label">Unidad</label>
-            <input type="text" class="form-control" id="mora_unidad" disabled>
-          </div>
-          <div class="col-6">
-            <label class="form-label">Vence</label>
-            <input type="text" class="form-control" id="mora_vence" disabled>
-          </div>
-        </div>
-
-        <div class="row mt-2 g-2">
-          <div class="col-4">
-            <label class="form-label">Monto (Bs)</label>
-            <input type="text" class="form-control text-end" id="mora_monto" disabled>
-          </div>
-          <div class="col-4">
-            <label class="form-label">Días Mora</label>
-            <input type="text" class="form-control text-end" id="mora_dias" disabled>
-          </div>
-          <div class="col-4">
-            <label class="form-label">Interés (Bs)</label>
-            <input type="text" class="form-control text-end" id="mora_interes" disabled>
-          </div>
-        </div>
-
-        <div class="mt-2">
-          <label class="form-label">Total c/ Mora (Bs)</label>
-          <input type="text" class="form-control text-end" id="mora_total" disabled>
-        </div>
-
-        <div class="form-text mt-2">La tasa anual usada es <?= round($tasa_anual*100,2) ?>% (tasa diaria <?= round($tasa_diaria*100,5) ?>%).</div>
+        <div id="recibo_alert" class="alert d-none"></div>
+        <div class="mb-2"><b>Residente:</b> <span id="r_residente">—</span></div>
+        <div class="mb-2"><b>Unidad:</b> <span id="r_unidad">—</span></div>
+        <div class="mb-2"><b>Concepto:</b> <span id="r_concepto">—</span></div>
+        <div class="mb-2"><b>Monto:</b> Bs <span id="r_monto">0.00</span></div>
+        <div class="mb-2"><b>Fecha de pago:</b> <span id="r_fecha">—</span></div>
+        <div class="mb-2"><b>ID de pago:</b> <span id="r_idpago">—</span></div>
+        <div class="small text-muted">Este recibo es referencial (no es un comprobante bancario).</div>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancelar</button>
-        <button class="btn btn-danger" id="btnApplyMora" type="submit">Aplicar Mora</button>
+        <button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">Cerrar</button>
+        <button class="btn btn-outline-primary" type="button" onclick="window.print()">
+          <i class="bi bi-printer"></i> Imprimir
+        </button>
       </div>
-    </form>
+    </div>
   </div>
 </div>
 
@@ -669,9 +657,7 @@ document.querySelectorAll('.btn-pay').forEach(btn=>{
         interes = Number(js.interes || 0);
         dias    = Number(js.dias_mora || 0);
       }
-    }catch(e){
-      // si falla, usamos solo el monto base
-    }
+    }catch(e){}
 
     // Mostrar monto final y desglose
     const fmt = (v)=> {
@@ -684,7 +670,7 @@ document.querySelectorAll('.btn-pay').forEach(btn=>{
     document.getElementById('pay_total').textContent        = fmt(total);
     document.getElementById('pay_mora_box').style.display   = interes>0 ? 'block' : 'none';
 
-    // Generar QR con TOTAL (base + mora)
+    // QR con TOTAL (base + mora)
     const texto = `iDomus|Cuota#${id}|Unidad:${unidad}|Concepto:${concepto}|MontoTotal:Bs ${total.toFixed(2)}|Base:Bs ${montoBase.toFixed(2)}|Mora:Bs ${interes.toFixed(2)}|Vence:${vence}`;
     const data  = encodeURIComponent(texto);
     const url   = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${data}`;
@@ -714,79 +700,37 @@ document.getElementById('formPay').addEventListener('submit', async (e)=>{
   }
 });
 
-// ====== Modal: Generar / Aplicar Mora (visualizar en modal) ======
-const modalMoraEl = document.getElementById('modalMora');
-const modalMora = modalMoraEl ? new bootstrap.Modal(modalMoraEl) : null;
-
-document.querySelectorAll('.btn-mora').forEach(btn=>{
+// ====== Modal: recibo (para cuotas ya pagadas) ======
+const modalRecibo = new bootstrap.Modal(document.getElementById('modalRecibo'));
+document.querySelectorAll('.btn-recibo').forEach(btn=>{
   btn.addEventListener('click', async ()=>{
-    const id = btn.getAttribute('data-id') || '0';
-    const user = btn.getAttribute('data-user') || '—';
-    const unidad = btn.getAttribute('data-unidad') || (btn.closest('tr')?.querySelector('td:nth-child(4)')?.textContent?.trim() || '—');
-    const vence = btn.getAttribute('data-vence') || '—';
-
-    document.getElementById('mora_id_cuota').value = id;
-    document.getElementById('mora_user').value = user;
-    document.getElementById('mora_unidad').value = unidad;
-    document.getElementById('mora_vence').value = vence;
-    document.getElementById('mora_monto').value = '...';
-    document.getElementById('mora_dias').value = '...';
-    document.getElementById('mora_interes').value = '...';
-    document.getElementById('mora_total').value = '...';
-    const alertBox = document.getElementById('mora_alert'); if (alertBox) { alertBox.classList.add('d-none'); alertBox.textContent=''; }
-
+    const id = btn.getAttribute('data-id')||'0';
     const fd = new FormData();
     fd.append('ajax','1');
-    fd.append('action','calc_mora');
+    fd.append('action','get_recibo');
     fd.append('id_cuota', id);
-    try {
+
+    const alertBox = document.getElementById('recibo_alert');
+    alertBox.classList.add('d-none'); alertBox.textContent='';
+
+    try{
       const res = await fetch('morosidad.php', { method:'POST', body: fd });
-      const js = await res.json();
-      if (!js.success) {
-        if (alertBox) { alertBox.className='alert alert-danger'; alertBox.textContent = js.message || 'Error al calcular'; alertBox.classList.remove('d-none'); }
-      } else {
-        document.getElementById('mora_monto').value   = js.monto;
-        document.getElementById('mora_dias').value    = js.dias_mora;
-        document.getElementById('mora_interes').value = js.interes;
-        document.getElementById('mora_total').value   = js.total;
+      const js  = await res.json();
+      if(!js?.success){
+        alertBox.className='alert alert-danger'; alertBox.textContent = js?.message || 'No se pudo cargar el recibo.'; alertBox.classList.remove('d-none');
+      }else{
+        document.getElementById('r_residente').textContent = js.residente || '—';
+        document.getElementById('r_unidad').textContent    = js.unidad || '—';
+        document.getElementById('r_concepto').textContent  = js.concepto || '—';
+        document.getElementById('r_monto').textContent     = (Number(js.monto||0)).toLocaleString('es-BO',{minimumFractionDigits:2,maximumFractionDigits:2});
+        document.getElementById('r_fecha').textContent     = js.fecha_pago || '—';
+        document.getElementById('r_idpago').textContent    = js.id_pago || '—';
       }
-    } catch (err) {
-      if (alertBox) { alertBox.className='alert alert-danger'; alertBox.textContent = 'Error de conexión.'; alertBox.classList.remove('d-none'); }
+    }catch(e){
+      alertBox.className='alert alert-danger'; alertBox.textContent = 'Error de conexión.'; alertBox.classList.remove('d-none');
     }
-
-    if (modalMora) modalMora.show();
+    modalRecibo.show();
   });
-});
-
-// ====== Submit: aplicar mora (AJAX) ======
-document.getElementById('formMora')?.addEventListener('submit', async (e)=>{
-  e.preventDefault();
-  const alertBox = document.getElementById('mora_alert');
-  const id = document.getElementById('mora_id_cuota').value;
-  const dias = document.getElementById('mora_dias').value || '0';
-  const interes = document.getElementById('mora_interes').value || '0';
-  const total = document.getElementById('mora_total').value || '0';
-
-  const fd = new FormData();
-  fd.append('ajax','1');
-  fd.append('action','apply_mora');
-  fd.append('id_cuota', id);
-  fd.append('dias_mora', dias);
-  fd.append('interes', interes);
-  fd.append('total', total);
-
-  try {
-    const res = await fetch('morosidad.php', { method:'POST', body: fd });
-    const js = await res.json();
-    if (js.success) {
-      if (alertBox) { alertBox.className='alert alert-success'; alertBox.textContent = js.message || 'Mora aplicada.'; alertBox.classList.remove('d-none'); }
-      setTimeout(()=> location.reload(), 900);
-    } else {
-      if (alertBox) { alertBox.className='alert alert-danger'; alertBox.textContent = js.message || 'Error al aplicar.'; alertBox.classList.remove('d-none'); }
-    }
-  } catch (err) {
-    if (alertBox) { alertBox.className='alert alert-danger'; alertBox.textContent = 'Error de conexión.'; alertBox.classList.remove('d-none'); }
-  }
 });
 </script>
 </body>
